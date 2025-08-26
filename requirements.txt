@@ -8,4 +8,4 @@ pykakasi
 jamdict
 jamdict-data
 PySide6
-googletrans==4.0.0rc1
+deep-translator

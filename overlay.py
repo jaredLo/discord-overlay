@@ -9,7 +9,12 @@ be resized normally.
 import sys
 import subprocess
 import pathlib
-from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 from PySide6.QtCore import Qt, QTimer
 
 TRANSCRIPT_FILE = pathlib.Path("transcript.txt")
@@ -28,11 +33,11 @@ class Overlay(QWidget):
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
 
         layout = QVBoxLayout(self)
-        self.label = QLabel()
-        self.label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.label.setTextFormat(Qt.RichText)
-        self.label.setWordWrap(True)
-        layout.addWidget(self.label)
+        self.text = QTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.text.setAcceptRichText(True)
+        layout.addWidget(self.text)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_text)
@@ -51,7 +56,7 @@ class Overlay(QWidget):
                 chunks.append(f"{jp}<br><span style='color: gray'>{en}</span>")
             else:
                 chunks.append(jp)
-        self.label.setText("<br><br>".join(chunks))
+        self.text.setHtml("<br><br>".join(chunks))
 
 
 def main() -> None:
