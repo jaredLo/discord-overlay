@@ -11,7 +11,6 @@ from faster_whisper import WhisperModel
 from pykakasi import kakasi
 from jamdict import Jamdict
 from fugashi import Tagger
-from typing import Optional
 
 # ================= Config (accuracy-first) =================
 TARGET_DEVICE_SUBSTR = "BlackHole"
@@ -24,7 +23,7 @@ VAD_LEVEL = 2
 SILENCE_HANG_MS = 320   # end-of-utterance when this much silence passes
 MIN_CHUNK_SEC = 1.4     # avoid decoding tiny blips
 MAX_CHUNK_SEC = 3.2     # flush even if continuous speech
-
+TRANSCRIPT_OUT = "transcript.txt"
 MODEL_SIZE = "base"
 COMPUTE_TYPE = "int8"   # on M1/8GB this is the safe choice
 
@@ -145,7 +144,7 @@ SKIP_POS = {"助詞","助動詞"}  # keep interjections; skip particles/aux
 def to_hira(s: str) -> str:
     return "".join(p["hira"] for p in _conv.convert(s))
 
-def get_reading(m) -> Optional[str]:
+def get_reading(m) -> str | None:
     return getattr(m.feature, "pron", None) or getattr(m.feature, "kana", None)
 
 def has_kata_letter(s: str) -> bool:
@@ -167,7 +166,7 @@ COUNTER_READ = {
 }
 KANJI_NUM_MAP = {"一":1,"二":2,"三":3,"四":4,"五":5,"六":6,"七":7,"八":8,"九":9,"十":10}
 
-def to_int_number(s: str) -> Optional[int]:
+def to_int_number(s: str) -> int | None:
     m = NUM_RE.fullmatch(s)
     if m:
         try: return int(m.group(0))
@@ -181,7 +180,7 @@ def to_int_number(s: str) -> Optional[int]:
         return val or None
     return None
 
-def best_gloss(word: str, prefer_counter=False) -> Optional[str]:
+def best_gloss(word: str, prefer_counter=False) -> str | None:
     try:
         r = _jam.lookup(word)
         cands = []
@@ -284,11 +283,18 @@ def annotate_text(text: str) -> str:
         out.append(f"{surf}({reading}" + (f"、{gloss})" if gloss else ")"))
         i += 1
     return "".join(out)
+ 
+ 
+def append_transcript(text: str):
+     with open(TRANSCRIPT_OUT, "a", encoding="utf-8") as f:
+         f.write(text + "\n")
+
 
 # ================= Main =================
 def main():
     dev_idx, dev_name = pick_input(TARGET_DEVICE_SUBSTR)
     print(f"Listening on: {dev_name}")
+    open(TRANSCRIPT_OUT, "w", encoding="utf-8").close()
     q = queue.Queue(maxsize=128)
     threading.Thread(target=audio_thread, args=(dev_idx, q), daemon=True).start()
 
@@ -305,6 +311,7 @@ def main():
             f = q.get()
             yield f
     for text in transcribe_iter(utterance_chunks(chunks()), model):
+        append_transcript(text)
         print(annotate_text(text))
 
 if __name__ == "__main__":
