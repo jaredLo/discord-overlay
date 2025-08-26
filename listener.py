@@ -3,16 +3,16 @@
 # Strategy: end-of-utterance chunks (silence or max length) → beam search (base/int8) → annotate tokens
 # Output example: みんな、小学校(しょうがっこう、elementary school)の時(とき、time)以来(いらい、since)だね。
 
-import time, queue, threading, sys, re
+import time, queue, threading, sys, re, os, functools
 import numpy as np
 import sounddevice as sd
 import webrtcvad
 from faster_whisper import WhisperModel
 from pykakasi import kakasi
-from jamdict import Jamdict
 from fugashi import Tagger
 from typing import Union
-from deep_translator import GoogleTranslator
+import requests
+from deep_translator import DeeplTranslator
 
 # ================= Config (accuracy-first) =================
 TARGET_DEVICE_SUBSTR = "BlackHole"
@@ -37,7 +37,10 @@ def make_tagger():
     except Exception:
         return Tagger()  # fallback (likely unidic-lite)
 tagger = make_tagger()
-translator = GoogleTranslator(source="ja", target="en")
+try:
+    _deepl = DeeplTranslator(source="ja", target="en", api_key=os.getenv("DEEPL_API_KEY"))
+except Exception:
+    _deepl = None
 
 # ================= Device pick =================
 def pick_input(substr):
@@ -135,7 +138,6 @@ def transcribe_iter(chunks_iter, model):
 # ================= Annotation engine =================
 _kks = kakasi(); _kks.setMode("J","H")
 _conv = _kks.getConverter()
-_jam = Jamdict()
 
 KANJI_RE = re.compile(r"[一-龯々〆ヵヶ]")
 KATA_LETTER_RE = re.compile(r"[ァ-ヴ]")  # excludes 'ー'
@@ -183,35 +185,47 @@ def to_int_number(s: str) -> Union[int, None]:
         return val or None
     return None
 
-def best_gloss(word: str, prefer_counter=False) -> Union[str, None]:
+@functools.lru_cache(maxsize=1024)
+def jisho_lookup(word: str):
     try:
-        r = _jam.lookup(word)
-        cands = []
-        for e in r.entries:
-            for s in e.senses:
-                pos_tags = set(getattr(s, "pos", []) or [])
-                for gl in getattr(s, "gloss", []):
-                    txt = getattr(gl, "text", None) or str(gl)
-                    lang = getattr(gl, "lang", None)
-                    if lang is not None and not str(lang).lower().startswith(("en","eng")):
-                        continue
-                    score = 0
-                    if "ctr" in pos_tags: score += 3
-                    if "n" in pos_tags:   score += 2
-                    if "suf" in pos_tags: score -= 2
-                    if prefer_counter and "ctr" in pos_tags: score += 2
-                    cands.append((score, txt))
-        if not cands: return None
-        cands.sort(key=lambda x: x[0], reverse=True)
-        return cands[0][1]
+        r = requests.get(
+            "https://jisho.org/api/v1/search/words",
+            params={"keyword": word},
+            timeout=5,
+        )
+        data = r.json()
+        if data.get("data"):
+            return data["data"][0]
     except Exception:
         return None
+    return None
 
-def jam_has_entry(s: str) -> bool:
-    try:
-        return bool(Jamdict().lookup(s).entries)
-    except Exception:
-        return False
+def best_gloss(word: str, prefer_counter=False) -> Union[str, None]:
+    if _deepl:
+        try:
+            return _deepl.translate(word)
+        except Exception:
+            pass
+    entry = jisho_lookup(word)
+    if not entry:
+        return None
+    cands = []
+    for sense in entry.get("senses", []):
+        pos_tags = set(sense.get("parts_of_speech") or [])
+        for gloss in sense.get("english_definitions") or []:
+            score = 0
+            if "Counter" in pos_tags:
+                score += 1
+            if prefer_counter and "Counter" in pos_tags:
+                score += 2
+            cands.append((score, gloss))
+    if not cands:
+        return None
+    cands.sort(key=lambda x: x[0], reverse=True)
+    return cands[0][1]
+
+def dict_has_entry(s: str) -> bool:
+    return jisho_lookup(s) is not None
 
 def compound_reading(tokens) -> str:
     kana = []
@@ -226,7 +240,7 @@ def maybe_merge_compound(tokens, i, max_len=3):
             seg = tokens[i:i+L]
             if all(getattr(t.feature,"pos1","")=="名詞" for t in seg):
                 surf = "".join(t.surface for t in seg)
-                if KANJI_RE.search(surf) and jam_has_entry(surf):
+                if KANJI_RE.search(surf) and dict_has_entry(surf):
                     reading = compound_reading(seg)
                     gloss = best_gloss(surf) or ""
                     anno = f"{surf}({reading}" + (f"、{gloss})" if gloss else ")")
@@ -291,16 +305,6 @@ def annotate_text(text: str) -> str:
 def append_transcript(text: str):
      with open(TRANSCRIPT_OUT, "a", encoding="utf-8") as f:
          f.write(text + "\n")
-
-
-def translate_text(text: str) -> str:
-    """Translate Japanese text to English using Google Translate."""
-    try:
-        return translator.translate(text)
-    except Exception:
-        return ""
-
-
 # ================= Main =================
 def main():
     dev_idx, dev_name = pick_input(TARGET_DEVICE_SUBSTR)
@@ -323,13 +327,8 @@ def main():
             yield f
     for text in transcribe_iter(utterance_chunks(chunks()), model):
         annotated = annotate_text(text)
-        translation = translate_text(text)
         append_transcript(annotated)
-        if translation:
-            append_transcript(translation)
         print(annotated)
-        if translation:
-            print(translation)
 
 if __name__ == "__main__":
     try:

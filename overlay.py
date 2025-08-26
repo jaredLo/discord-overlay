@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QTextCursor
 
 TRANSCRIPT_FILE = pathlib.Path("transcript.txt")
 
@@ -45,18 +46,11 @@ class Overlay(QWidget):
         self.update_text()
 
     def update_text(self) -> None:
-        """Refresh overlay with annotated text and English translation."""
+        """Refresh overlay with annotated text."""
         lines = read_transcript().splitlines()
-        chunks: list[str] = []
-        # Pair every two lines as [annotated JP, translation]
-        for i in range(0, len(lines), 2):
-            jp = lines[i]
-            en = lines[i + 1] if i + 1 < len(lines) else ""
-            if en:
-                chunks.append(f"{jp}<br><span style='color: gray'>{en}</span>")
-            else:
-                chunks.append(jp)
-        self.text.setHtml("<br><br>".join(chunks))
+        self.text.setHtml("<br><br>".join(lines))
+        self.text.moveCursor(QTextCursor.End)
+        self.text.verticalScrollBar().setValue(self.text.verticalScrollBar().maximum())
 
 
 def main() -> None:

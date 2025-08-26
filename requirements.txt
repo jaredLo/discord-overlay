@@ -5,7 +5,6 @@ faster-whisper
 fugashi
 unidic-lite
 pykakasi
-jamdict
-jamdict-data
 PySide6
 deep-translator
+requests
