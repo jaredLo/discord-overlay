@@ -12,6 +12,7 @@ from pykakasi import kakasi
 from jamdict import Jamdict
 from fugashi import Tagger
 from googletrans import Translator
+from typing import Union
 
 # ================= Config (accuracy-first) =================
 TARGET_DEVICE_SUBSTR = "BlackHole"
@@ -146,7 +147,7 @@ SKIP_POS = {"助詞","助動詞"}  # keep interjections; skip particles/aux
 def to_hira(s: str) -> str:
     return "".join(p["hira"] for p in _conv.convert(s))
 
-def get_reading(m) -> str | None:
+def get_reading(m) -> Union[str, None]:
     return getattr(m.feature, "pron", None) or getattr(m.feature, "kana", None)
 
 def has_kata_letter(s: str) -> bool:
@@ -168,7 +169,7 @@ COUNTER_READ = {
 }
 KANJI_NUM_MAP = {"一":1,"二":2,"三":3,"四":4,"五":5,"六":6,"七":7,"八":8,"九":9,"十":10}
 
-def to_int_number(s: str) -> int | None:
+def to_int_number(s: str) -> Union[int, None]:
     m = NUM_RE.fullmatch(s)
     if m:
         try: return int(m.group(0))
@@ -182,7 +183,7 @@ def to_int_number(s: str) -> int | None:
         return val or None
     return None
 
-def best_gloss(word: str, prefer_counter=False) -> str | None:
+def best_gloss(word: str, prefer_counter=False) -> Union[str, None]:
     try:
         r = _jam.lookup(word)
         cands = []
