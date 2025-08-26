@@ -30,6 +30,7 @@ class Overlay(QWidget):
         layout = QVBoxLayout(self)
         self.label = QLabel()
         self.label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.label.setTextFormat(Qt.RichText)
         self.label.setWordWrap(True)
         layout.addWidget(self.label)
 
@@ -39,7 +40,18 @@ class Overlay(QWidget):
         self.update_text()
 
     def update_text(self) -> None:
-        self.label.setText(read_transcript())
+        """Refresh overlay with annotated text and English translation."""
+        lines = read_transcript().splitlines()
+        chunks: list[str] = []
+        # Pair every two lines as [annotated JP, translation]
+        for i in range(0, len(lines), 2):
+            jp = lines[i]
+            en = lines[i + 1] if i + 1 < len(lines) else ""
+            if en:
+                chunks.append(f"{jp}<br><span style='color: gray'>{en}</span>")
+            else:
+                chunks.append(jp)
+        self.label.setText("<br><br>".join(chunks))
 
 
 def main() -> None:

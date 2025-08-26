@@ -11,6 +11,7 @@ from faster_whisper import WhisperModel
 from pykakasi import kakasi
 from jamdict import Jamdict
 from fugashi import Tagger
+from googletrans import Translator
 
 # ================= Config (accuracy-first) =================
 TARGET_DEVICE_SUBSTR = "BlackHole"
@@ -35,6 +36,7 @@ def make_tagger():
     except Exception:
         return Tagger()  # fallback (likely unidic-lite)
 tagger = make_tagger()
+translator = Translator()
 
 # ================= Device pick =================
 def pick_input(substr):
@@ -290,6 +292,14 @@ def append_transcript(text: str):
          f.write(text + "\n")
 
 
+def translate_text(text: str) -> str:
+    """Translate Japanese text to English using Google Translate."""
+    try:
+        return translator.translate(text, src="ja", dest="en").text
+    except Exception:
+        return ""
+
+
 # ================= Main =================
 def main():
     dev_idx, dev_name = pick_input(TARGET_DEVICE_SUBSTR)
@@ -311,8 +321,14 @@ def main():
             f = q.get()
             yield f
     for text in transcribe_iter(utterance_chunks(chunks()), model):
-        append_transcript(text)
-        print(annotate_text(text))
+        annotated = annotate_text(text)
+        translation = translate_text(text)
+        append_transcript(annotated)
+        if translation:
+            append_transcript(translation)
+        print(annotated)
+        if translation:
+            print(translation)
 
 if __name__ == "__main__":
     try:
