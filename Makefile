@@ -6,4 +6,3 @@ ENV_NAME ?= discord-overlay
 start:
 	@eval "$$(conda shell.bash hook)" && conda activate "$(ENV_NAME)" && python api/listener.py
 
-
