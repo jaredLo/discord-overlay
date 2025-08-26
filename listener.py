@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-# listener.py — YouTube → BlackHole → hybrid VAD/time chunking → Whisper → keywords.json (kanji + furigana)
+# listener.py — YouTube → BlackHole → hybrid VAD/time chunking → Whisper → keywords.json
+# Emits keywords as: JP（reading, EN）
 
-import json, time, queue, threading, sys
+import json, time, queue, threading, sys, re
+from collections import deque
 import numpy as np
 import sounddevice as sd
 import webrtcvad
 from faster_whisper import WhisperModel
 from fugashi import Tagger
 from pykakasi import kakasi
+from jamdict import Jamdict
 
 # =====================
 # Config
@@ -21,10 +24,13 @@ COMPUTE_TYPE = "int8"                # "int8" is fast on CPU; try "float16" on f
 
 # Chunking behavior (prevents long stalls during nonstop speech)
 VAD_AGGRESSIVENESS = 2               # 0..3 (higher = more strict)
-HANG_MS = 350                        # how long to wait after last speech frame before closing chunk
+HANG_MS = 350                        # wait after last speech frame before closing chunk
 MAX_CHUNK_SEC = 3.0                  # force flush every ~3s even if speaker never pauses
 MIN_CHUNK_SEC = 0.8                  # ignore tiny fragments
 OVERLAP_SEC = 0.25                   # context overlap between consecutive chunks
+
+# Rolling window for stabler keywords
+WINDOW_SEC = 12.0                    # lookback window for keyword extraction
 
 # Keywords output
 MAX_WORDS = 8
@@ -124,7 +130,23 @@ def transcribe_iter(chunks_iter, model):
             yield text
 
 # =====================
-# Keywords (noun-only) + furigana (Kakasi convert API)
+# Rolling window of recent text
+# =====================
+class RollingText:
+    def __init__(self, seconds: float):
+        self.seconds = seconds
+        self.buf: deque[tuple[float,str]] = deque()
+    def add(self, text: str):
+        now = time.time()
+        self.buf.append((now, text))
+        cutoff = now - self.seconds
+        while self.buf and self.buf[0][0] < cutoff:
+            self.buf.popleft()
+    def text(self) -> str:
+        return "。".join(t for _, t in self.buf)
+
+# =====================
+# Keywords (noun-first, with fallbacks) + furigana + English gloss
 # =====================
 tagger = Tagger()
 
@@ -136,15 +158,89 @@ def to_hira(s: str) -> str:
     # pykakasi v2+: use convert(); join hira parts
     return "".join(p["hira"] for p in _conv.convert(s))
 
-def extract_keywords_ja(text, topn=MAX_WORDS):
-    freq = {}
-    for m in tagger(text):
-        if getattr(m.feature, "pos1", "") == "名詞":
-            w = m.surface
-            if len(w) >= 2 and w not in JA_STOP:
-                freq[w] = freq.get(w, 0) + 1
+_jam = Jamdict()
+_GLOSS_CACHE: dict[str, str | None] = {}
+
+def ja_gloss(word: str) -> str | None:
+    g = _GLOSS_CACHE.get(word)
+    if g is not None:
+        return g
+    try:
+        res = _jam.lookup(word)
+        for e in res.entries:
+            for s in e.senses:
+                # prefer English or unlabeled glosses
+                gls = []
+                for gl in getattr(s, "gloss", []):
+                    txt = getattr(gl, "text", None) or str(gl)
+                    lang = getattr(gl, "lang", None)
+                    gls.append((lang, txt))
+                for lang, txt in gls:
+                    if (lang is None) or str(lang).lower().startswith(("en","eng")):
+                        _GLOSS_CACHE[word] = txt
+                        return txt
+                if gls:
+                    _GLOSS_CACHE[word] = gls[0][1]
+                    return gls[0][1]
+        _GLOSS_CACHE[word] = None
+        return None
+    except Exception:
+        _GLOSS_CACHE[word] = None
+        return None
+
+_num_re = re.compile(r"\d+(?:[.,]\d+)?")
+_katakana_re = re.compile(r"[ァ-ヴー]{2,}")
+
+def extract_keywords_ja(text: str, topn=MAX_WORDS):
+    # 1) collect nouns (allow 1-char) by lemma; 2) fallback verbs/adjectives; 3) pad with numbers/katakana
+    freq: dict[str,int] = {}
+    tokens = list(tagger(text))
+
+    def add_word(w: str):
+        if len(w) >= 1 and w not in JA_STOP:
+            freq[w] = freq.get(w, 0) + 1
+
+    for m in tokens:
+        pos1 = getattr(m.feature, "pos1", "")
+        base = getattr(m.feature, "lemma", None) or m.surface
+        if pos1 == "名詞":
+            add_word(base)
+
     ranked = sorted(freq.items(), key=lambda x: (x[1], len(x[0])), reverse=True)
-    return [{"kanji": w, "reading": to_hira(w)} for w, _ in ranked[:topn]]
+    chosen = [w for w,_ in ranked]
+
+    if len(chosen) < topn:
+        for m in tokens:
+            pos1 = getattr(m.feature, "pos1", "")
+            base = getattr(m.feature, "lemma", None) or m.surface
+            if pos1 in ("動詞","形容詞") and base not in JA_STOP and base != "する":
+                if base not in chosen:
+                    chosen.append(base)
+                    if len(chosen) >= topn:
+                        break
+
+    if len(chosen) < topn:
+        for n in _num_re.findall(text):
+            if n not in chosen:
+                chosen.append(n)
+                if len(chosen) >= topn:
+                    break
+
+    if len(chosen) < topn:
+        for k in _katakana_re.findall(text):
+            if k not in chosen:
+                chosen.append(k)
+                if len(chosen) >= topn:
+                    break
+
+    # build keyword objects
+    items = []
+    for w in chosen[:topn]:
+        if _num_re.fullmatch(w):
+            items.append({"kanji": w, "reading": w, "en": None})
+        else:
+            items.append({"kanji": w, "reading": to_hira(w), "en": ja_gloss(w)})
+    return items
 
 # =====================
 # Output writer
@@ -169,11 +265,18 @@ def main():
     print("Loading Whisper (first run downloads model)…")
     model = WhisperModel(MODEL_SIZE, device="cpu", compute_type=COMPUTE_TYPE)
 
+    window = RollingText(WINDOW_SEC)
+
     for text in transcribe_iter(vad_or_time_chunks(frames()), model):
-        kws = extract_keywords_ja(text)
-        write_keywords(kws)
+        window.add(text)
+        kw_items = extract_keywords_ja(window.text(), topn=MAX_WORDS)
+        write_keywords(kw_items)
+        pretty = " / ".join(
+            f"{k['kanji']}（{k['reading']}" + (f", {k['en']}" if k.get('en') else "") + "）"
+            for k in kw_items
+        )
         print("ASR:", text)
-        print("KW :", " / ".join(k['kanji'] for k in kws))
+        print("KW :", pretty)
 
 if __name__ == "__main__":
     try:

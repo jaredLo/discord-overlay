@@ -1,0 +1,10 @@
+numpy
+sounddevice
+webrtcvad
+faster-whisper
+fugashi
+unidic-lite
+pykakasi
+jamdict
+jamdict-data
+PySide6
