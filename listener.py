@@ -11,7 +11,7 @@ from faster_whisper import WhisperModel
 from pykakasi import kakasi
 from jamdict import Jamdict
 from fugashi import Tagger
-from googletrans import Translator
+from deep_translator import GoogleTranslator
 
 # ================= Config (accuracy-first) =================
 TARGET_DEVICE_SUBSTR = "BlackHole"
@@ -36,7 +36,7 @@ def make_tagger():
     except Exception:
         return Tagger()  # fallback (likely unidic-lite)
 tagger = make_tagger()
-translator = Translator()
+translator = GoogleTranslator(source="ja", target="en")
 
 # ================= Device pick =================
 def pick_input(substr):
@@ -295,7 +295,7 @@ def append_transcript(text: str):
 def translate_text(text: str) -> str:
     """Translate Japanese text to English using Google Translate."""
     try:
-        return translator.translate(text, src="ja", dest="en").text
+        return translator.translate(text)
     except Exception:
         return ""
 
