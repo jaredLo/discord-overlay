@@ -25,12 +25,12 @@ COMPUTE_TYPE = "int8"                # "int8" is fast on CPU; try "float16" on f
 # Chunking behavior (prevents long stalls during nonstop speech)
 VAD_AGGRESSIVENESS = 2               # 0..3 (higher = more strict)
 HANG_MS = 350                        # wait after last speech frame before closing chunk
-MAX_CHUNK_SEC = 3.0                  # force flush every ~3s even if speaker never pauses
+MAX_CHUNK_SEC = 2.0                  # force flush every ~3s even if speaker never pauses
 MIN_CHUNK_SEC = 0.8                  # ignore tiny fragments
 OVERLAP_SEC = 0.25                   # context overlap between consecutive chunks
 
 # Rolling window for stabler keywords
-WINDOW_SEC = 12.0                    # lookback window for keyword extraction
+WINDOW_SEC = 8.0                    # lookback window for keyword extraction
 
 # Keywords output
 MAX_WORDS = 8
@@ -275,7 +275,7 @@ def main():
             f"{k['kanji']}（{k['reading']}" + (f", {k['en']}" if k.get('en') else "") + "）"
             for k in kw_items
         )
-        print("ASR:", text)
+        # print("ASR:", text)
         print("KW :", pretty)
 
 if __name__ == "__main__":
