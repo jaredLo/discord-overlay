@@ -35,6 +35,7 @@ WINDOW_SEC = 8.0                    # lookback window for keyword extraction
 # Keywords output
 MAX_WORDS = 8
 KEYWORDS_OUT = "keywords.json"
+TRANSCRIPT_OUT = "transcript.txt"
 
 # Optional stop words to keep the list useful
 JA_STOP = {"こと","とき","ところ","ため","もの","これ","それ","あれ"}
@@ -249,12 +250,17 @@ def write_keywords(items):
     with open(KEYWORDS_OUT, "w", encoding="utf-8") as f:
         json.dump({"updated": time.time(), "items": items}, f, ensure_ascii=False)
 
+def append_transcript(text: str):
+    with open(TRANSCRIPT_OUT, "a", encoding="utf-8") as f:
+        f.write(text + "\n")
+
 # =====================
 # Main
 # =====================
 def main():
     dev_idx, dev_name = pick_input(TARGET_DEVICE_SUBSTR)
     print(f"Listening on: {dev_name}")
+    open(TRANSCRIPT_OUT, "w", encoding="utf-8").close()
     q = queue.Queue(maxsize=128)
     threading.Thread(target=audio_thread, args=(dev_idx, q), daemon=True).start()
 
@@ -269,6 +275,7 @@ def main():
 
     for text in transcribe_iter(vad_or_time_chunks(frames()), model):
         window.add(text)
+        append_transcript(text)
         kw_items = extract_keywords_ja(window.text(), topn=MAX_WORDS)
         write_keywords(kw_items)
         pretty = " / ".join(
