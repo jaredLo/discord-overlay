@@ -275,6 +275,7 @@ NUM_RE = re.compile(r"\d+")
 KANJI_NUM_RE = re.compile(r"[一二三四五六七八九十百千]+")
 PUNCT_POS = {"記号"}
 SKIP_POS = {"助詞","助動詞"}  # keep interjections; skip particles/aux
+SKIP_COUNTER_ANNOTATION = True  # skip translating counters like 三人, 3枚
 
 def to_hira(s: str) -> str:
     return "".join(p["hira"] for p in _conv.convert(s))
@@ -414,6 +415,14 @@ def compound_reading(tokens) -> str:
         kana.append(k if k else m.surface)
     return to_hira("".join(kana))
 
+def _is_number_counter(surf: str) -> bool:
+    # Detect forms like 3人, 三人, 10枚 etc.
+    if len(surf) >= 2 and surf[-1] in COUNTER_READ:
+        n = to_int_number(surf[:-1])
+        if n is not None:
+            return True
+    return False
+
 def maybe_merge_compound(tokens, i, max_len=4):
     # Allow compounds including prefix/suffix parts commonly used in words
     # e.g., お + 名詞 + さん (お姉さん), お + 疲れ + 様 (お疲れ様)
@@ -426,6 +435,9 @@ def maybe_merge_compound(tokens, i, max_len=4):
         surf = "".join(t.surface for t in seg)
         # Only consider if likely a lexicalized phrase
         if (KANJI_RE.search(surf) or has_kata_letter(surf)) and dict_has_entry(surf):
+            if SKIP_COUNTER_ANNOTATION and _is_number_counter(surf):
+                # Treat as plain text when it's number+counter
+                return None
             reading = compound_reading(seg)
             gloss = best_gloss(surf) or ""
             anno = f"{surf}({to_hira(reading)}" + (f"、{gloss})" if gloss else ")")
@@ -479,40 +491,28 @@ def annotate_text(text: str) -> str:
             i += 1
             continue
 
-        # Counter patterns: [number][counter] or prev number + counter
-        if len(surf) >= 2 and surf[-1] in COUNTER_READ:
-            n = to_int_number(surf[:-1])
-            if n and 1 <= n <= 10:
-                reading = COUNTER_READ[surf[-1]][n-1]
-                gloss = best_gloss(surf[-1], prefer_counter=True) or "counter"
-                out.append(f"{surf}({reading}、{gloss})")
-                i += 1
-                continue
-        if surf in COUNTER_READ and i > 0:
-            n = to_int_number(toks[i-1].surface)
-            if n and 1 <= n <= 10:
-                reading = COUNTER_READ[surf][n-1]
-                gloss = best_gloss(surf, prefer_counter=True) or "counter"
-                out.append(f"{surf}({reading}、{gloss})")
-                i += 1
-                continue
+        # Counter patterns: [number][counter] or prev number + counter -> skip annotation
+        if SKIP_COUNTER_ANNOTATION:
+            if len(surf) >= 2 and surf[-1] in COUNTER_READ:
+                n = to_int_number(surf[:-1])
+                if n and 1 <= n <= 10:
+                    out.append(surf)
+                    i += 1
+                    continue
+            if surf in COUNTER_READ and i > 0:
+                n = to_int_number(toks[i-1].surface)
+                if n and 1 <= n <= 10:
+                    out.append(surf)
+                    i += 1
+                    continue
 
-        # Annotate tokens that have kanji or katakana letters.
-        # Additionally, if a gloss exists offline (JMdict/glossary), annotate even for kana-only nouns/verbs.
+        # Annotate only if token contains kanji or katakana letters
+        # Pure hiragana words are left unannotated for readability
         annotatable = bool(KANJI_RE.search(surf) or has_kata_letter(surf))
         if not annotatable:
-            lemma = getattr(m.feature, "lemma", None) or surf
-            gloss = best_gloss(lemma) or best_gloss(surf)
-            if gloss:
-                k = get_reading(m)
-                reading = to_hira(k) if k else to_hira(surf)
-                out.append(f"{surf}({reading}、{gloss})")
-                i += 1
-                continue
-            else:
-                out.append(surf)
-                i += 1
-                continue
+            out.append(surf)
+            i += 1
+            continue
 
         # Reading from tagger or kakasi
         k = get_reading(m)

@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QFileSystemWatcher
 from PySide6.QtGui import QTextCursor
 
 TRANSCRIPT_FILE = pathlib.Path("transcript.txt")
@@ -40,10 +41,16 @@ class Overlay(QWidget):
         self.text.setAcceptRichText(True)
         layout.addWidget(self.text)
 
+        # File watcher for near-instant updates
+        self.watcher = QFileSystemWatcher(self)
+        if TRANSCRIPT_FILE.exists():
+            self.watcher.addPath(str(TRANSCRIPT_FILE))
+        self.watcher.fileChanged.connect(self.update_text)
+
+        # Lightweight backup poller in case watcher misses events
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_text)
-        # Faster refresh for near real-time feel
-        self.timer.start(100)
+        self.timer.start(500)
         self.update_text()
 
     def update_text(self) -> None:
