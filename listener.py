@@ -25,7 +25,7 @@ CHANNELS_IN = 2
 # Utterance chunking tuned for lower latency
 VAD_LEVEL = 2
 SILENCE_HANG_MS = 120   # quicker end detection for faster flush
-MIN_CHUNK_SEC = 0.40    # smaller chunks for near real-time
+MIN_CHUNK_SEC = 0.30    # smaller chunks for near real-time
 MAX_CHUNK_SEC = 1.2     # force periodic flush during long speech
 TRANSCRIPT_OUT = "transcript.txt"
 MODEL_SIZE = os.getenv("MODEL_SIZE", "small")
@@ -462,6 +462,28 @@ def find_keyword_match(tokens, i, max_len=3):
             return anno, L
     return None
 
+def maybe_merge_inflection(tokens, i):
+    """Merge verb/adjective base + simple inflectional suffix (e.g., 待っ + て → 待って).
+    Targets common small-っ te/ta forms and similar light endings.
+    """
+    m = tokens[i]
+    pos1 = getattr(m.feature, "pos1", "")
+    if pos1 not in {"動詞", "形容詞"}:
+        return None
+    if i + 1 >= len(tokens):
+        return None
+    t1 = tokens[i+1]
+    suf = t1.surface
+    if suf in {"て", "た", "だ", "で"} and getattr(t1.feature, "pos1", "") in {"助詞", "助動詞"}:
+        seg = tokens[i:i+2]
+        surf = "".join(t.surface for t in seg)
+        reading = to_hira(compound_reading(seg))
+        lemma = getattr(m.feature, "lemma", None) or m.surface
+        gloss = best_gloss(lemma) or best_gloss(m.surface)
+        anno = f"{surf}({reading}" + (f"、{gloss})" if gloss else ")")
+        return anno, 2
+    return None
+
 def annotate_text(text: str) -> str:
     toks = list(tagger(text))
     out = []; i = 0
@@ -470,6 +492,13 @@ def annotate_text(text: str) -> str:
         matched = find_keyword_match(toks, i, max_len=3)
         if matched:
             anno, L = matched
+            out.append(anno)
+            i += L
+            continue
+        # merge simple inflection (e.g., 待っ + て)
+        merged_inf = maybe_merge_inflection(toks, i)
+        if merged_inf:
+            anno, L = merged_inf
             out.append(anno)
             i += L
             continue
