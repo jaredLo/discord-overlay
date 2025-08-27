@@ -13,21 +13,26 @@ from fugashi import Tagger
 from typing import Union
 import requests
 from deep_translator import DeeplTranslator
+import json, pathlib
 
-# ================= Config (accuracy-first) =================
+# ================= Config (latency-leaning translate) =================
 TARGET_DEVICE_SUBSTR = "BlackHole"
 SAMPLE_RATE = 16000
 FRAME_MS = 20          # WebRTC VAD requires 10/20/30ms
 CHANNELS_IN = 2
 
-# Utterance chunking (accuracy > latency)
+# Utterance chunking tuned for lower latency
 VAD_LEVEL = 2
-SILENCE_HANG_MS = 320   # end-of-utterance when this much silence passes
-MIN_CHUNK_SEC = 1.4     # avoid decoding tiny blips
-MAX_CHUNK_SEC = 3.2     # flush even if continuous speech
+SILENCE_HANG_MS = 120   # quicker end detection for faster flush
+MIN_CHUNK_SEC = 0.40    # smaller chunks for near real-time
+MAX_CHUNK_SEC = 1.2     # force periodic flush during long speech
 TRANSCRIPT_OUT = "transcript.txt"
-MODEL_SIZE = "base"
-COMPUTE_TYPE = "int8"   # on M1/8GB this is the safe choice
+MODEL_SIZE = os.getenv("MODEL_SIZE", "small")
+COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "int8")   # on M1/8GB this is the safe choice
+ASR_BEAM_SIZE = int(os.getenv("ASR_BEAM_SIZE", "1"))
+
+# Output mode: "translate" for English, "annotate" for JP+furigana+gloss
+OUTPUT_MODE = os.getenv("OUTPUT_MODE", "annotate").lower()
 
 # ================= UniDic tagger (full if available) =================
 def make_tagger():
@@ -37,10 +42,110 @@ def make_tagger():
     except Exception:
         return Tagger()  # fallback (likely unidic-lite)
 tagger = make_tagger()
+ALLOW_ONLINE_GLOSS = os.getenv("ALLOW_ONLINE_GLOSS", "0") in {"1","true","TRUE","yes","YES"}
 try:
-    _deepl = DeeplTranslator(source="ja", target="en", api_key=os.getenv("DEEPL_API_KEY"))
+    _deepl = DeeplTranslator(source="ja", target="en", api_key=os.getenv("DEEPL_API_KEY")) if ALLOW_ONLINE_GLOSS else None
 except Exception:
     _deepl = None
+
+# ================= Keywords (limit annotations to these) =================
+_KW_PATH = pathlib.Path("keywords.json")
+_kw_cache = {"mtime": None, "map": {}}
+
+def _normalize_key(s: str) -> str:
+    return s.strip()
+
+def load_keywords():
+    try:
+        mtime = _KW_PATH.stat().st_mtime
+    except FileNotFoundError:
+        _kw_cache["map"] = {}
+        _kw_cache["mtime"] = None
+        return _kw_cache["map"]
+    if _kw_cache["mtime"] == mtime:
+        return _kw_cache["map"]
+    try:
+        data = json.loads(_KW_PATH.read_text(encoding="utf-8"))
+        items = data.get("items") or []
+        mapping = {}
+        for it in items:
+            surf = str(it.get("kanji") or "").strip()
+            if not surf:
+                continue
+            key = _normalize_key(surf)
+            mapping[key] = {
+                "reading": (it.get("reading") or "").strip() or None,
+                "en": (it.get("en") or "").strip() or None,
+            }
+        _kw_cache["map"] = mapping
+        _kw_cache["mtime"] = mtime
+        return mapping
+    except Exception:
+        _kw_cache["map"] = {}
+        _kw_cache["mtime"] = mtime
+        return _kw_cache["map"]
+
+# ================= Offline glossary (fast local glosses) =================
+_GLOSS_PATH = pathlib.Path("glossary.json")
+_gl_cache = {"mtime": None, "map": {}}
+
+def load_glossary():
+    try:
+        mtime = _GLOSS_PATH.stat().st_mtime
+    except FileNotFoundError:
+        _gl_cache["map"] = {}
+        _gl_cache["mtime"] = None
+        return _gl_cache["map"]
+    if _gl_cache["mtime"] == mtime:
+        return _gl_cache["map"]
+    try:
+        data = json.loads(_GLOSS_PATH.read_text(encoding="utf-8"))
+        mapping = {}
+        for k, v in (data or {}).items():
+            if not k:
+                continue
+            mapping[_normalize_key(k)] = (v or "").strip() or None
+        _gl_cache["map"] = mapping
+        _gl_cache["mtime"] = mtime
+        return mapping
+    except Exception:
+        _gl_cache["map"] = {}
+        return _gl_cache["map"]
+
+"""
+Optional large offline dictionary (JMdict index)
+- Provide a JSON file where keys are surface/reading strings and values are
+  either a string gloss or a list of gloss strings. Path via env `JMDICT_JSON`
+  or default `jmdict.min.json` in repo root. Loaded lazily and cached by mtime.
+"""
+_JMDICT_JSON_PATH = pathlib.Path(os.getenv("JMDICT_JSON", "jmdict.min.json"))
+_jmd_cache = {"mtime": None, "map": {}}
+
+def load_jmdict_min():
+    try:
+        mtime = _JMDICT_JSON_PATH.stat().st_mtime
+    except FileNotFoundError:
+        _jmd_cache["map"] = {}
+        _jmd_cache["mtime"] = None
+        return _jmd_cache["map"]
+    if _jmd_cache["mtime"] == mtime:
+        return _jmd_cache["map"]
+    try:
+        data = json.loads(_JMDICT_JSON_PATH.read_text(encoding="utf-8"))
+        mapping = {}
+        for k, v in (data or {}).items():
+            if not k:
+                continue
+            if isinstance(v, list):
+                mapping[_normalize_key(k)] = [str(x) for x in v if x]
+            elif isinstance(v, str):
+                mapping[_normalize_key(k)] = [v]
+        _jmd_cache["map"] = mapping
+        _jmd_cache["mtime"] = mtime
+        return mapping
+    except Exception:
+        _jmd_cache["map"] = {}
+        return _jmd_cache["map"]
 
 # ================= Device pick =================
 def pick_input(substr):
@@ -119,13 +224,14 @@ def good_seg(s):
     if getattr(s, "compression_ratio", 0) > 2.4: return False
     return True
 
-def transcribe_iter(chunks_iter, model):
+def transcribe_iter(chunks_iter, model, task: str = "transcribe"):
     for audio in chunks_iter:
         audio = preprocess(audio)
         segs, _ = model.transcribe(
             audio,
             language="ja",
-            beam_size=5,                 # steadier than 1
+            task=("translate" if task == "translate" else "transcribe"),
+            beam_size=ASR_BEAM_SIZE,     # fastest default
             temperature=0.0,             # deterministic
             vad_filter=False,
             condition_on_previous_text=False,
@@ -168,6 +274,7 @@ COUNTER_READ = {
     "台": ["いちだい","にだい","さんだい","よんだい","ごだい","ろくだい","ななだい","はちだい","きゅうだい","じゅうだい"],
     "個": ["いっこ","にこ","さんこ","よんこ","ごこ","ろっこ","ななこ","はっこ","きゅうこ","じゅっこ"],
     "円": ["いちえん","にえん","さんえん","よえん","ごえん","ろくえん","ななえん","はちえん","きゅうえん","じゅうえん"],
+    "枚": ["いちまい","にまい","さんまい","よんまい","ごまい","ろくまい","ななまい","はちまい","きゅうまい","じゅうまい"],
 }
 KANJI_NUM_MAP = {"一":1,"二":2,"三":3,"四":4,"五":5,"六":6,"七":7,"八":8,"九":9,"十":10}
 
@@ -187,11 +294,13 @@ def to_int_number(s: str) -> Union[int, None]:
 
 @functools.lru_cache(maxsize=1024)
 def jisho_lookup(word: str):
+    if not ALLOW_ONLINE_GLOSS:
+        return None
     try:
         r = requests.get(
             "https://jisho.org/api/v1/search/words",
             params={"keyword": word},
-            timeout=5,
+            timeout=0.3,
         )
         data = r.json()
         if data.get("data"):
@@ -200,7 +309,22 @@ def jisho_lookup(word: str):
         return None
     return None
 
+@functools.lru_cache(maxsize=4096)
 def best_gloss(word: str, prefer_counter=False) -> Union[str, None]:
+    w = _normalize_key(word)
+    # 1) keywords override (fast)
+    kw = load_keywords().get(w)
+    if kw and kw.get("en"):
+        return kw["en"]
+    # 2) offline glossary (fast)
+    gl = load_glossary().get(w)
+    if gl:
+        return gl
+    # 3) JMdict index (if present)
+    jmd = load_jmdict_min().get(w)
+    if jmd:
+        return jmd[0] if isinstance(jmd, list) and jmd else jmd
+    # 3) optional online (short timeouts)
     if _deepl:
         try:
             return _deepl.translate(word)
@@ -225,6 +349,11 @@ def best_gloss(word: str, prefer_counter=False) -> Union[str, None]:
     return cands[0][1]
 
 def dict_has_entry(s: str) -> bool:
+    s = _normalize_key(s)
+    if s in load_glossary():
+        return True
+    if s in load_keywords():
+        return True
     return jisho_lookup(s) is not None
 
 def compound_reading(tokens) -> str:
@@ -235,68 +364,98 @@ def compound_reading(tokens) -> str:
     return to_hira("".join(kana))
 
 def maybe_merge_compound(tokens, i, max_len=3):
-    for L in (3,2):
+    # Try 3 -> 2 length noun compounds that have dictionary entries
+    for L in (3, 2):
         if i+L <= len(tokens):
             seg = tokens[i:i+L]
-            if all(getattr(t.feature,"pos1","")=="名詞" for t in seg):
+            if all(getattr(t.feature, "pos1", "") == "名詞" for t in seg):
                 surf = "".join(t.surface for t in seg)
                 if KANJI_RE.search(surf) and dict_has_entry(surf):
                     reading = compound_reading(seg)
                     gloss = best_gloss(surf) or ""
-                    anno = f"{surf}({reading}" + (f"、{gloss})" if gloss else ")")
+                    anno = f"{surf}({to_hira(reading)}" + (f"、{gloss})" if gloss else ")")
                     return anno, L
+    return None
+
+def find_keyword_match(tokens, i, max_len=3):
+    kws = load_keywords()
+    # longest match first
+    for L in range(min(max_len, len(tokens)-i), 0, -1):
+        surf = "".join(t.surface for t in tokens[i:i+L])
+        key = _normalize_key(surf)
+        if key in kws:
+            meta = kws[key]
+            # reading fallback using tokenizer/kakasi
+            reading = meta.get("reading") or compound_reading(tokens[i:i+L])
+            gloss = meta.get("en") or None
+            if not gloss:
+                # final fallback if provided file has no gloss
+                gloss = best_gloss(surf) or None
+            anno = f"{surf}({to_hira(reading)}" + (f"、{gloss})" if gloss else ")")
+            return anno, L
     return None
 
 def annotate_text(text: str) -> str:
     toks = list(tagger(text))
     out = []; i = 0
     while i < len(toks):
+        # try to match configured keywords (up to 3 tokens)
+        matched = find_keyword_match(toks, i, max_len=3)
+        if matched:
+            anno, L = matched
+            out.append(anno)
+            i += L
+            continue
         m = toks[i]
         surf = m.surface
         pos1 = getattr(m.feature, "pos1", "")
 
-        # Compound merge first
+        # Compound merge if recognized word
         merged = maybe_merge_compound(toks, i)
         if merged:
             anno, L = merged
-            out.append(anno); i += L; continue
+            out.append(anno)
+            i += L
+            continue
 
-        # Skip punctuation/particles/aux
+        # Skip punctuation/particles/aux as-is
         if pos1 in PUNCT_POS or pos1 in SKIP_POS:
-            out.append(surf); i += 1; continue
+            out.append(surf)
+            i += 1
+            continue
 
-        # Counter pattern: [number][counter] or previous number + counter
+        # Counter patterns: [number][counter] or prev number + counter
         if len(surf) >= 2 and surf[-1] in COUNTER_READ:
             n = to_int_number(surf[:-1])
             if n and 1 <= n <= 10:
                 reading = COUNTER_READ[surf[-1]][n-1]
-                gloss = best_gloss(surf[-1], prefer_counter=True)
-                out.append(f"{surf}({reading}" + (f"、{gloss})" if gloss else ")"))
-                i += 1; continue
+                gloss = best_gloss(surf[-1], prefer_counter=True) or "counter"
+                out.append(f"{surf}({reading}、{gloss})")
+                i += 1
+                continue
         if surf in COUNTER_READ and i > 0:
             n = to_int_number(toks[i-1].surface)
             if n and 1 <= n <= 10:
                 reading = COUNTER_READ[surf][n-1]
-                gloss = best_gloss(surf, prefer_counter=True)
-                out.append(f"{surf}({reading}" + (f"、{gloss})" if gloss else ")"))
-                i += 1; continue
+                gloss = best_gloss(surf, prefer_counter=True) or "counter"
+                out.append(f"{surf}({reading}、{gloss})")
+                i += 1
+                continue
 
-        # Annotate only if kanji present or has katakana letter (not just 'ー')
+        # Annotate tokens that have kanji or katakana letters
         annotatable = bool(KANJI_RE.search(surf) or has_kata_letter(surf))
         if not annotatable:
-            out.append(surf); i += 1; continue
+            out.append(surf)
+            i += 1
+            continue
 
-        # Reading: fugashi > kakasi
+        # Reading from tagger or kakasi
         k = get_reading(m)
         reading = to_hira(k) if k else to_hira(surf)
 
-        # 人 defaults to 'ひと' unless used with a number (handled above)
+        # Prefer lemma for dictionary lookup
         lemma = getattr(m.feature, "lemma", None) or surf
-        prefer_counter = False
-        if surf == "人" and not (i > 0 and to_int_number(toks[i-1].surface)):
-            prefer_counter = False
-
-        gloss = best_gloss(lemma, prefer_counter=prefer_counter) or best_gloss(surf, prefer_counter=prefer_counter)
+        gloss = best_gloss(lemma) or best_gloss(surf)
         out.append(f"{surf}({reading}" + (f"、{gloss})" if gloss else ")"))
         i += 1
     return "".join(out)
@@ -325,10 +484,16 @@ def main():
         while True:
             f = q.get()
             yield f
-    for text in transcribe_iter(utterance_chunks(chunks()), model):
-        annotated = annotate_text(text)
-        append_transcript(annotated)
-        print(annotated)
+    task = "translate" if OUTPUT_MODE == "translate" else "transcribe"
+    for text in transcribe_iter(utterance_chunks(chunks()), model, task=task):
+        if OUTPUT_MODE == "translate":
+            # Already translated to English by Whisper
+            append_transcript(text)
+            print(text)
+        else:
+            annotated = annotate_text(text)
+            append_transcript(annotated)
+            print(annotated)
 
 if __name__ == "__main__":
     try:

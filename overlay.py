@@ -42,7 +42,8 @@ class Overlay(QWidget):
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_text)
-        self.timer.start(500)
+        # Faster refresh for near real-time feel
+        self.timer.start(100)
         self.update_text()
 
     def update_text(self) -> None:
