@@ -14,6 +14,7 @@ from typing import Union
 import requests
 from deep_translator import DeeplTranslator
 import json, pathlib
+import sqlite3
 
 # ================= Config (latency-leaning translate) =================
 TARGET_DEVICE_SUBSTR = "BlackHole"
@@ -146,6 +147,29 @@ def load_jmdict_min():
     except Exception:
         _jmd_cache["map"] = {}
         return _jmd_cache["map"]
+
+# Optional SQLite index (faster cold start vs big JSON)
+_JMDICT_DB_PATH = pathlib.Path(os.getenv("JMDICT_DB", "jmdict.sqlite"))
+_jmd_db = {"conn": None, "mtime": None}
+
+def _open_jmdict_db():
+    try:
+        mtime = _JMDICT_DB_PATH.stat().st_mtime
+    except FileNotFoundError:
+        _jmd_db["conn"] = None
+        _jmd_db["mtime"] = None
+        return None
+    if _jmd_db["conn"] is not None and _jmd_db["mtime"] == mtime:
+        return _jmd_db["conn"]
+    try:
+        conn = sqlite3.connect(str(_JMDICT_DB_PATH))
+        conn.row_factory = sqlite3.Row
+        _jmd_db["conn"] = conn
+        _jmd_db["mtime"] = mtime
+        return conn
+    except Exception:
+        _jmd_db["conn"] = None
+        return None
 
 # ================= Device pick =================
 def pick_input(substr):
@@ -320,11 +344,27 @@ def best_gloss(word: str, prefer_counter=False) -> Union[str, None]:
     gl = load_glossary().get(w)
     if gl:
         return gl
-    # 3) JMdict index (if present)
+    # 3) JMdict SQLite (if present)
+    conn = _open_jmdict_db()
+    if conn is not None:
+        try:
+            cur = conn.execute("SELECT gloss FROM entries WHERE term = ? LIMIT 1", (w,))
+            row = cur.fetchone()
+            if row is not None:
+                try:
+                    arr = json.loads(row["gloss"]) if row["gloss"] else []
+                    if isinstance(arr, list) and arr:
+                        return arr[0]
+                except Exception:
+                    if row["gloss"]:
+                        return row["gloss"]
+        except Exception:
+            pass
+    # 4) JMdict JSON index (if present)
     jmd = load_jmdict_min().get(w)
     if jmd:
         return jmd[0] if isinstance(jmd, list) and jmd else jmd
-    # 3) optional online (short timeouts)
+    # 5) optional online (short timeouts)
     if _deepl:
         try:
             return _deepl.translate(word)
@@ -350,10 +390,21 @@ def best_gloss(word: str, prefer_counter=False) -> Union[str, None]:
 
 def dict_has_entry(s: str) -> bool:
     s = _normalize_key(s)
-    if s in load_glossary():
+    if s in load_glossary() or s in load_keywords():
         return True
-    if s in load_keywords():
+    # JMdict SQLite
+    conn = _open_jmdict_db()
+    if conn is not None:
+        try:
+            cur = conn.execute("SELECT 1 FROM entries WHERE term = ? LIMIT 1", (s,))
+            if cur.fetchone() is not None:
+                return True
+        except Exception:
+            pass
+    # JMdict JSON
+    if s in load_jmdict_min():
         return True
+    # Optional online
     return jisho_lookup(s) is not None
 
 def compound_reading(tokens) -> str:
@@ -363,18 +414,22 @@ def compound_reading(tokens) -> str:
         kana.append(k if k else m.surface)
     return to_hira("".join(kana))
 
-def maybe_merge_compound(tokens, i, max_len=3):
-    # Try 3 -> 2 length noun compounds that have dictionary entries
-    for L in (3, 2):
-        if i+L <= len(tokens):
-            seg = tokens[i:i+L]
-            if all(getattr(t.feature, "pos1", "") == "名詞" for t in seg):
-                surf = "".join(t.surface for t in seg)
-                if KANJI_RE.search(surf) and dict_has_entry(surf):
-                    reading = compound_reading(seg)
-                    gloss = best_gloss(surf) or ""
-                    anno = f"{surf}({to_hira(reading)}" + (f"、{gloss})" if gloss else ")")
-                    return anno, L
+def maybe_merge_compound(tokens, i, max_len=4):
+    # Allow compounds including prefix/suffix parts commonly used in words
+    # e.g., お + 名詞 + さん (お姉さん), お + 疲れ + 様 (お疲れ様)
+    ALLOW = {"名詞", "接頭詞", "接尾辞"}
+    for L in range(min(max_len, len(tokens)-i), 1, -1):
+        seg = tokens[i:i+L]
+        pos_ok = all(getattr(t.feature, "pos1", "") in ALLOW for t in seg)
+        if not pos_ok:
+            continue
+        surf = "".join(t.surface for t in seg)
+        # Only consider if likely a lexicalized phrase
+        if (KANJI_RE.search(surf) or has_kata_letter(surf)) and dict_has_entry(surf):
+            reading = compound_reading(seg)
+            gloss = best_gloss(surf) or ""
+            anno = f"{surf}({to_hira(reading)}" + (f"、{gloss})" if gloss else ")")
+            return anno, L
     return None
 
 def find_keyword_match(tokens, i, max_len=3):
@@ -442,12 +497,22 @@ def annotate_text(text: str) -> str:
                 i += 1
                 continue
 
-        # Annotate tokens that have kanji or katakana letters
+        # Annotate tokens that have kanji or katakana letters.
+        # Additionally, if a gloss exists offline (JMdict/glossary), annotate even for kana-only nouns/verbs.
         annotatable = bool(KANJI_RE.search(surf) or has_kata_letter(surf))
         if not annotatable:
-            out.append(surf)
-            i += 1
-            continue
+            lemma = getattr(m.feature, "lemma", None) or surf
+            gloss = best_gloss(lemma) or best_gloss(surf)
+            if gloss:
+                k = get_reading(m)
+                reading = to_hira(k) if k else to_hira(surf)
+                out.append(f"{surf}({reading}、{gloss})")
+                i += 1
+                continue
+            else:
+                out.append(surf)
+                i += 1
+                continue
 
         # Reading from tagger or kakasi
         k = get_reading(m)
