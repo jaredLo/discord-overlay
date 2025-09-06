@@ -537,13 +537,23 @@ def _gpt_request(jp_text: str) -> Optional[Dict]:
     }
     system = (
         "You are a precise Japanese annotator and translator. "
-        "Given a single Japanese utterance, produce a strict JSON object with: "
-        "jp_html (Japanese line: annotate key vocabulary inline as surface(reading), reading must be kana; katakana words keep katakana), "
-        "en_html (faithful English translation), "
-        "vocabs (array of objects id/surface/reading_kana/meaning_en for used items), "
-        "tips (1-2 concise reply suggestions in Japanese, optionally with short English gloss). "
-        "Wrap each vocabulary occurrence in both jp_html and en_html with <span data-id=\"vN\">…</span> using matching ids for alignment. "
-        "Do not invent text; only annotate items present. Preserve original order/punctuation. Return JSON only with these keys."
+        "Given a single Japanese utterance, return STRICT JSON with ONLY these keys: "
+        "jp_html, en_html, vocabs, discourse, connectives, contextual_vocab, personal_vocab, tense_cheat, compliments, mood, mood_phrases, fallback, tips. "
+        "jp_html: Full Japanese preserving order/punctuation. Annotate key vocabulary inline as surface(reading); reading is kana only. Kanji words use hiragana; katakana loanwords keep katakana. Wrap each chosen vocab occurrence in <span data-id=\\\"vN\\\">…</span> so ids align with English and vocab list. "
+        "en_html: Faithful, natural English translation covering the entire utterance. Wrap the English phrase corresponding to each vocab with the same <span data-id=\\\"vN\\\">…</span>. "
+        "vocabs: Array of items actually present in input. Each: { id: 'v1', surface, reading_kana, meaning_en }. Prioritize nouns, verbs, adjectives, set phrases, counters; avoid particles/aux unless semantically important. "
+        "discourse: 1–3 discourse markers appropriate to the context (e.g., ところで, ちなみに, それなら, それで, でも). "
+        "connectives: 1–3 connectives appropriate to the context (e.g., しかし, なので, つまり, それに). "
+        "contextual_vocab: exactly 3 items { surface, reading_kana, meaning_en } relevant to the current topic; HOWEVER if the utterance asks where/when/what/time-of-year, replace these with relative-time examples such as 二年前, 二週間前, 三ヶ月前 (with readings/meanings). "
+        "personal_vocab: exactly 3 items from the user's profile (motorcycle, programmer/job in software, freestyle swimming/watersports, Malaysian identity), as { surface, reading_kana, meaning_en }. "
+        "tense_cheat: main action verb (or best candidate) with BOTH forms and readings: { present_polite, present_polite_reading, past_polite, past_polite_reading, present_casual, present_casual_reading, past_casual, past_casual_reading }. "
+        "compliments: if appropriate to compliment, 3 short options as [{ jp, reading_kana, en }]. "
+        "mood: optional short label of detected mood (e.g., encouraging/empathetic), and mood_phrases: 3 short options as [{ jp, reading_kana, en }]. "
+        "fallback: a single concise, polite rescue phrase suited to the context: { jp, reading_kana, en }. "
+        "tips: 1–2 concise reply suggestions in Japanese (optionally brief EN gloss). "
+        "Constraints: No invented content. Every vocabs[i].id must appear at least once as <span data-id=\\\"vN\\\"> in BOTH jp_html and en_html. Keep outputs concise; glosses 1–5 words. "
+        "If compress_elongations=true, shorten extreme ー/〜 runs and add an ellipsis; otherwise preserve as written. "
+        "Select up to max_vocab items for jp/en spans. Respond with VALID JSON only—no Markdown, no extra text."
     )
     user = {
         "utterance": jp_text,
@@ -611,10 +621,108 @@ def _render_four_lines(j: Dict) -> List[str]:
         )
     vocab_line = "Vocab: " + (" ・ ".join(voc_items) if voc_items else "(none)")
 
-    tips = j.get("tips") or []
-    tips_line = "Reply: " + (" / ".join(html.escape(t) for t in tips) if tips else "")
+    # Line 4 composition
+    discourse = [str(x) for x in (j.get("discourse") or []) if x]
+    connectives = [str(x) for x in (j.get("connectives") or []) if x]
+    cv = j.get("contextual_vocab") or []
+    cv_parts = []
+    for item in cv:
+        s = item.get("surface") or ""
+        r = item.get("reading_kana") or ""
+        m = item.get("meaning_en") or ""
+        if s:
+            cv_parts.append(f"{html.escape(s)}({html.escape(r)}) — {html.escape(m)}")
+    tense = j.get("tense_cheat") or {}
+    tp = tense.get("present_polite") or ""
+    tpp = tense.get("past_polite") or ""
+    tc = tense.get("present_casual") or ""
+    tcc = tense.get("past_casual") or ""
+    fb = j.get("fallback") or {}
+    fb_jp = fb.get("jp") or ""
+    fb_rd = fb.get("reading_kana") or ""
+    fb_en = fb.get("en") or ""
 
-    return [jp_c, en_c, vocab_line, tips_line]
+    parts = []
+    # Icon compact style (Option C)
+    markers = []
+    if discourse:
+        markers.extend(discourse)
+    if connectives:
+        markers.extend(connectives)
+    if markers:
+        parts.append("🏷️ Markers: " + " • ".join(html.escape(x) for x in markers))
+    if cv_parts:
+        parts.append("📚 Context Vocab: " + " • ".join(cv_parts))
+
+    # Personal vocab (profile-based)
+    pv = j.get("personal_vocab") or []
+    pv_parts = []
+    for item in pv:
+        s = item.get("surface") or ""
+        r = item.get("reading_kana") or ""
+        m = item.get("meaning_en") or ""
+        if s:
+            pv_parts.append(f"{html.escape(s)}({html.escape(r)}) — {html.escape(m)}")
+    if pv_parts:
+        parts.append("🧩 Personal: " + " • ".join(pv_parts))
+    # Tense with readings
+    if any([tp, tpp, tc, tcc]):
+        tpr = (tense.get("present_polite_reading") or "").strip()
+        tppr = (tense.get("past_polite_reading") or "").strip()
+        tcr = (tense.get("present_casual_reading") or "").strip()
+        tccr = (tense.get("past_casual_reading") or "").strip()
+        tense_bits = []
+        if tp or tpp:
+            left = html.escape(tp)
+            right = html.escape(tpp)
+            left_r = f"({html.escape(tpr)})" if tpr else ""
+            right_r = f"({html.escape(tppr)})" if tppr else ""
+            tense_bits.append(f"{left}{left_r}/{right}{right_r}".strip("/"))
+        if tc or tcc:
+            left = html.escape(tc)
+            right = html.escape(tcc)
+            left_r = f"({html.escape(tcr)})" if tcr else ""
+            right_r = f"({html.escape(tccr)})" if tccr else ""
+            tense_bits.append(f"{left}{left_r}/{right}{right_r}".strip("/"))
+        if tense_bits:
+            parts.append("⏱ Tense: " + " • ".join(tense_bits))
+    if fb_jp:
+        fb_str = f"🛟 Fallback: {html.escape(fb_jp)} ({html.escape(fb_rd)}) — {html.escape(fb_en)}"
+        parts.append(fb_str)
+
+    # Compliments and mood phrases (optional)
+    comps = j.get("compliments") or []
+    comp_parts = []
+    for c in comps:
+        jp = c.get("jp") or ""
+        rd = c.get("reading_kana") or ""
+        en = c.get("en") or ""
+        if jp:
+            comp_parts.append(f"{html.escape(jp)} ({html.escape(rd)}) — {html.escape(en)}")
+    if comp_parts:
+        parts.append("💐 Compliments: " + " • ".join(comp_parts))
+
+    mood = j.get("mood") or ""
+    mood_phrases = j.get("mood_phrases") or []
+    if mood and mood_phrases:
+        mp_parts = []
+        for c in mood_phrases:
+            jp = c.get("jp") or ""
+            rd = c.get("reading_kana") or ""
+            en = c.get("en") or ""
+            if jp:
+                mp_parts.append(f"{html.escape(jp)} ({html.escape(rd)}) — {html.escape(en)}")
+        if mp_parts:
+            parts.append("🧭 Mood: " + html.escape(str(mood)) + ": " + " • ".join(mp_parts))
+
+    tips = j.get("tips") or []
+    if tips:
+        parts.append("💬 Replies: " + " / ".join(html.escape(t) for t in tips))
+
+    # Stack each section on its own line for readability
+    line4 = "<br>".join(p for p in parts if p)
+
+    return [jp_c, en_c, vocab_line, line4]
 
 # =============== Main ===============
 def main():

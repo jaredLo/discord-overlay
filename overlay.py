@@ -38,6 +38,13 @@ class Overlay(QWidget):
         self.text.setReadOnly(True)
         self.text.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.text.setAcceptRichText(True)
+        # Increase base font size by +3pt
+        f = self.text.font()
+        sz = f.pointSize()
+        if sz <= 0:
+            sz = 12
+        f.setPointSize(sz + 3)
+        self.text.setFont(f)
         layout.addWidget(self.text)
 
         self.timer = QTimer(self)
