@@ -14,3 +14,19 @@ Vocab: <span data-id="v1" style="color:#d32f2f">やばい(やばい) — oh no</
 <span style="color:#888">Ah ha ha ha ha�</span>
 Vocab: (none)
 
+で、でも、こう、<span data-id="v1" style="color:#d32f2f">なんか</span>ですね、この<span data-id="v2" style="color:#1976d2">ブロック</span>
+<span style="color:#888">Well, but, like, <span data-id="v1" style="color:#d32f2f">something</span> you see, this <span data-id="v2" style="color:#1976d2">block</span></span>
+Vocab: <span data-id="v1" style="color:#d32f2f">なんか(なんか) — something</span> ・ <span data-id="v2" style="color:#1976d2">ブロック(ブロック) — block</span>
+
+<span data-id="v1" style="color:#d32f2f">を</span>使って<span data-id="v2" style="color:#1976d2">上</span>に<span data-id="v3" style="color:#388e3c">登</span>りたいんですけどその<span data-id="v4" style="color:#f57c00">手前</span>に
+<span style="color:#888">I want to <span data-id="v2" style="color:#1976d2">climb up</span> using <span data-id="v1" style="color:#d32f2f">it</span>, but <span data-id="v4" style="color:#f57c00">before that</span>...</span>
+Vocab: <span data-id="v1" style="color:#d32f2f">を() — object marker</span> ・ <span data-id="v2" style="color:#1976d2">登(のぼ) — climb</span> ・ <span data-id="v3" style="color:#388e3c">上(うえ) — up</span> ・ <span data-id="v4" style="color:#f57c00">手前(てまえ) — before</span>
+
+<span data-id="v1" style="color:#d32f2f">あさまっちゃう</span>んだよなぁ… <span data-id="v2" style="color:#1976d2">あさまっちゃう</span> <span data-id="v3" style="color:#388e3c">くぼみ</span>があり…
+<span style="color:#888"><span data-id="v1" style="color:#d32f2f">I end up waking up</span>... <span data-id="v2" style="color:#1976d2">I end up waking up</span> <span data-id="v3" style="color:#388e3c">a dent</span> exists...</span>
+Vocab: <span data-id="v1" style="color:#d32f2f">あさまっちゃう(あさまっちゃう) — end up waking up</span> ・ <span data-id="v2" style="color:#1976d2">あさまっちゃう(あさまっちゃう) — end up waking up</span> ・ <span data-id="v3" style="color:#388e3c">くぼみ(くぼみ) — dent</span>
+
+すいちゃんからもらった<span data-id="v1" style="color:#d32f2f">石</span>を
+<span style="color:#888">The <span data-id="v1" style="color:#d32f2f">stone</span> I received from <span data-id="v2" style="color:#1976d2">Sui-chan</span>.</span>
+Vocab: <span data-id="v1" style="color:#d32f2f">石(いし) — stone</span> ・ <span data-id="v2" style="color:#1976d2">すいちゃん(すいちゃん) — Sui-chan</span>
+
