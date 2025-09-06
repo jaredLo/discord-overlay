@@ -35,7 +35,7 @@
       }
     },
     "windows": [
-      { "title": "Discord Overlay", "width": 800, "height": 560 }
+      { "title": "Discord Overlay", "width": 1400, "height": 700 }
     ],
     "security": { "csp": null },
     "bundle": {

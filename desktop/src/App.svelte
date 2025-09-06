@@ -43,6 +43,12 @@
   type Suggest = { ja: string, read?: string, en?: string, ts?: number, ctx?: string }
   let suggestions: Suggest[] = []
   let suggTimeline: Array<Suggest & { count: number }> = []
+  // Far right: ASR debug
+  let debugOpen = true
+  const DEBUG_W_OPEN = 360
+  const DEBUG_W_CLOSED = 26
+  type AsrRow = { id: string, ts: number, openai?: { text?: string, ms?: number }, remote?: { text?: string, ms?: number }, local?: { text?: string, ms?: number } }
+  let asrRows: AsrRow[] = []
 
 
   function updateScrollState() {
@@ -157,6 +163,10 @@
       }
       setInterval(pollSugg, 1000); pollSugg()
     }
+
+    // ASR debug poll
+    const pollAsr = async () => { try { const r = await client.asrDebugLog(); if ((r.items||[]).length) { asrRows = r.items as any } } catch {} }
+    setInterval(pollAsr, 1000); pollAsr()
 
     // Poll waveform
     const pollWave = async () => {
@@ -429,6 +439,36 @@
       </div>
     </div>
   {/if}
+
+  <div class="sidebar sidebar-debug" style={`width:${debugOpen ? DEBUG_W_OPEN : DEBUG_W_CLOSED}px`}>
+    <div class="sidebar-toggle" title={debugOpen ? 'Collapse' : 'Expand'} on:click={() => debugOpen = !debugOpen}>
+      {#if debugOpen}▶{:else}◀{/if}
+    </div>
+    <div class="sidebar-content" style={`opacity:${debugOpen ? 1 : 0}; pointer-events:${debugOpen ? 'auto' : 'none'}; transition: opacity 120ms ease;`}>
+      <div class="vocabs-header"><div class="sidebar-title">ASR Debug</div><div><small style="margin-right:8px;">{asrRows.length}</small></div></div>
+      <div class="vocabs-list">
+        {#each asrRows as r}
+          <div class="pair">
+            <div class="asr-col">
+              <div class="asr-title">OpenAI</div>
+              <div class="asr-card">{r.openai?.text || ''}</div>
+              <div class="asr-meta">{r.openai?.ms ? `${r.openai.ms} ms` : ''}</div>
+            </div>
+            <div class="asr-col">
+              <div class="asr-title">Home</div>
+              <div class="asr-card">{r.remote?.text || ''}</div>
+              <div class="asr-meta">{r.remote?.ms ? `${r.remote.ms} ms` : ''}</div>
+            </div>
+            <div class="asr-col">
+              <div class="asr-title">Local</div>
+              <div class="asr-card">{r.local?.text || ''}</div>
+              <div class="asr-meta">{r.local?.ms ? `${r.local.ms} ms` : ''}</div>
+            </div>
+          </div>
+        {/each}
+      </div>
+    </div>
+  </div>
 </div>
 
 {#if hoverVisible}

@@ -96,6 +96,7 @@ FORMAT_WORKERS = int(os.getenv("FORMAT_WORKERS", "4"))
 # Output line controls
 SHOW_VOCAB_LINE = os.getenv("SHOW_VOCAB_LINE", "false").lower() in {"1","true","yes","y"}
 SHOW_DETAILS_LINE = os.getenv("SHOW_DETAILS_LINE", "false").lower() in {"1","true","yes","y"}
+SHOW_ASR_DEBUG = os.getenv("SHOW_ASR_DEBUG", "true").lower() in {"1","true","yes","y"}
 
 # Output
 TRANSCRIPT_OUT = "transcript.txt"
@@ -438,6 +439,22 @@ def _ensure_local_model():
             num_workers=NUM_WORKERS,
         )
     return _local_model_cache[0]
+
+def _local_transcribe_text(audio: np.ndarray, model=None) -> str:
+    try:
+        m = model if model is not None else _ensure_local_model()
+        segs, _ = m.transcribe(
+            audio,
+            language="ja",
+            beam_size=1 if CAPTURE_ALL else 5,
+            temperature=0.0,
+            vad_filter=False,
+            condition_on_previous_text=False,
+            without_timestamps=True
+        )
+        return ("".join(s.text for s in segs if good_seg(s)).strip())
+    except Exception:
+        return ""
 
 def transcribe_iter(chunks_iter, model):
     for audio in chunks_iter:
@@ -888,6 +905,36 @@ def update_suggestions(items):
     except Exception:
         pass
 
+# =============== ASR debug compare (openai vs remote) ===============
+ASR_DEBUG_FILE = "asr_debug.json"
+_ASR_DEBUG_LOCK = threading.Lock()
+
+def _asr_debug_update(item_id: str, backend: str, text: Optional[str], ms: Optional[int]):
+    try:
+        import json as _json
+        with _ASR_DEBUG_LOCK:
+            data = []
+            try:
+                with open(ASR_DEBUG_FILE, "r", encoding="utf-8") as f:
+                    data = _json.load(f) or []
+            except Exception:
+                data = []
+            found = None
+            for it in data:
+                if it.get("id") == item_id:
+                    found = it; break
+            if not found:
+                found = {"id": item_id, "ts": int(time.time()*1000)}
+                data.append(found)
+            found[backend] = {"text": text or "", "ms": ms if ms is not None else None}
+            data = data[-300:]
+            tmp = ASR_DEBUG_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                _json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, ASR_DEBUG_FILE)
+    except Exception:
+        pass
+
 # =============== GPT formatter (annotation + translation) ===============
 def _gpt_request(jp_text: str) -> Optional[Dict]:
     if not USE_GPT_FORMATTER:
@@ -1238,6 +1285,28 @@ def main():
                 txt = transcribe_chunk(audio, model)
             except Exception:
                 txt = ""
+            # Debug compare: fire openai and remote on the same chunk (non-blocking)
+            if SHOW_ASR_DEBUG:
+                try:
+                    def run_openai(a):
+                        if not OPENAI_API_KEY:
+                            return
+                        t0 = time.time(); r = _openai_transcribe(a) or ""; ms = int((time.time()-t0)*1000)
+                        _asr_debug_update(item_id, "openai", r, ms)
+                    def run_remote(a):
+                        if not REMOTE_ASR_URL:
+                            return
+                        t0 = time.time(); r = _remote_transcribe(a) or ""; ms = int((time.time()-t0)*1000)
+                        _asr_debug_update(item_id, "remote", r, ms)
+                    def run_local(a):
+                        t0 = time.time(); r = _local_transcribe_text(a, model) or ""; ms = int((time.time()-t0)*1000)
+                        _asr_debug_update(item_id, "local", r, ms)
+                    item_id = f"{int(time.time()*1000)}-{hashlib.md5(audio.tobytes()).hexdigest()[:6]}"
+                    threading.Thread(target=run_openai, args=(audio.copy(),), daemon=True).start()
+                    threading.Thread(target=run_remote, args=(audio.copy(),), daemon=True).start()
+                    threading.Thread(target=run_local, args=(audio.copy(),), daemon=True).start()
+                except Exception:
+                    pass
             if txt:
                 text_q.put(txt)
 

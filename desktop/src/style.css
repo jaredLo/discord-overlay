@@ -31,6 +31,12 @@ input, button, textarea { font-size: 14px; }
 .sidebar { position: relative; display: flex; flex-direction: column; gap: 8px; background: transparent; border: 1px solid rgba(255,255,255,0.05); border-radius: 8px; padding: 8px; overflow-x: hidden; overflow-y: visible; transition: width 120ms ease; height: 100%; }
 .sidebar-left { /* left rail specific tweaks */ }
 .sidebar-right { /* right rail specific tweaks */ }
+.sidebar-debug { /* far-right debug rail */ }
+.sidebar-debug .pair { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.asr-col { display: flex; flex-direction: column; gap: 4px; }
+.asr-title { font-weight: 600; font-size: 12px; color: #9ca3af; }
+.asr-card { background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 6px; min-height: 44px; white-space: pre-wrap; }
+.asr-meta { font-size: 11px; color: #9ca3af; }
 .sidebar-title { font-weight: 600; color: #cbd5e1; margin-bottom: 4px; }
 .sidebar small { color: #9ca3af; }
 .sidebar-toggle { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(15,23,42,0.95); border: 1px solid rgba(255,255,255,0.10); border-radius: 999px; width: 22px; height: 28px; display: flex; align-items: center; justify-content: center; cursor: pointer; user-select: none; font-size: 12px; }

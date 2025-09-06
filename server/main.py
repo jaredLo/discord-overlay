@@ -35,6 +35,7 @@ _load_env_file(ROOT / ".env")
 TRANSCRIPT_FILE = ROOT / "transcript.txt"
 WAVEFORM_FILE = ROOT / "waveform.json"
 SUGGESTIONS_FILE = ROOT / "suggestions.json"
+ASR_DEBUG_FILE = ROOT / "asr_debug.json"
 
 listener_proc: Optional[subprocess.Popen] = None
 
@@ -155,6 +156,28 @@ def get_suggestions():
                 if jp:
                     out.append({"ja": jp, "read": rd, "en": en, "ts": ts})
             return JSONResponse({"items": out[-300:]})
+    except Exception:
+        pass
+    return JSONResponse({"items": []})
+
+
+@app.get("/api/debug/asr")
+def get_asr_debug():
+    try:
+        import json
+        if ASR_DEBUG_FILE.exists():
+            arr = json.loads(ASR_DEBUG_FILE.read_text(encoding="utf-8")) or []
+            # normalize
+            out = []
+            for it in arr:
+                out.append({
+                    "id": it.get("id"),
+                    "ts": it.get("ts"),
+                    "openai": it.get("openai") or {},
+                    "remote": it.get("remote") or {},
+                    "local": it.get("local") or {},
+                })
+            return JSONResponse({"items": out})
     except Exception:
         pass
     return JSONResponse({"items": []})
