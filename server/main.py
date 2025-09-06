@@ -35,14 +35,16 @@ _load_env_file(ROOT / ".env")
 TRANSCRIPT_FILE = ROOT / "transcript.txt"
 WAVEFORM_FILE = ROOT / "waveform.json"
 import re
-from typing import List, Dict
+from typing import List, Dict, Optional
+import json as _json
 try:
     from fugashi import Tagger as _Tagger
     from pykakasi import kakasi as _kakasi
     _tagger = _Tagger()
     _kks = _kakasi(); _kks.setMode("J","H"); _conv = _kks.getConverter()
+    _rk = _kakasi(); _rk.setMode("H","a"); _rk.setMode("K","a"); _rk.setMode("J","a"); _romaji_conv = _rk.getConverter()
 except Exception:
-    _tagger = None; _conv = None
+    _tagger = None; _conv = None; _romaji_conv = None
 ASR_DEBUG_FILE = ROOT / "asr_debug.json"
 
 listener_proc: Optional[subprocess.Popen] = None
@@ -157,6 +159,14 @@ def _to_hira(s: str) -> str:
     except Exception:
         return s
 
+def _to_romaji(s: str) -> str:
+    if _romaji_conv is None:
+        return s
+    try:
+        return str(_romaji_conv.do(s)).lower()
+    except Exception:
+        return s
+
 def _reading_for(jp: str) -> str:
     if _tagger is None: return _to_hira(jp)
     try:
@@ -180,7 +190,7 @@ def _jisho_best_gloss(word: str) -> str:
     try:
         import requests
         url = f"https://jisho.org/api/v1/search/words?keyword={requests.utils.quote(word)}"
-        r = requests.get(url, timeout=5)
+        r = requests.get(url, timeout=3)
         j = r.json(); d = j.get('data') or []
         if not d: return ''
         senses = d[0].get('senses') or []
@@ -191,20 +201,106 @@ def _jisho_best_gloss(word: str) -> str:
         return ''
     return ''
 
+def _internal_suggestions(bases: List[str], max_items=30) -> List[Dict[str,str]]:
+    """Optional hook to an internal JP library/service.
+    If env SIM_API_URL is set, POST { bases: [...], top_k } and expect
+    { items: [ { ja, read, en } ... ] }.
+    If a local module jp_internal is available with similar_words(bases, top_k), use it.
+    Returns a list of dicts { ja, read, en } or [].
+    """
+    out: List[Dict[str, str]] = []
+    try:
+        url = os.getenv('SIM_API_URL')
+        if url:
+            import requests as _rq
+            r = _rq.post(url, json={ 'bases': bases, 'top_k': max_items }, timeout=3)
+            r.raise_for_status()
+            data = r.json() or {}
+            items = data.get('items') or []
+            for it in items:
+                ja = (it.get('ja') or it.get('jp') or '').strip()
+                if not ja: continue
+                rd = (it.get('read') or it.get('reading') or it.get('reading_kana') or '').strip()
+                en = (it.get('en') or it.get('gloss') or '').strip()
+                out.append({ 'ja': ja, 'read': rd, 'en': en })
+            if out:
+                return out[:max_items]
+    except Exception:
+        pass
+    # Try local module
+    try:
+        import jp_internal  # type: ignore
+        try:
+            items = jp_internal.similar_words(bases, max_items)  # expected list of { ja, read?, en? }
+        except Exception:
+            items = []
+        for it in (items or []):
+            ja = (it.get('ja') or it.get('jp') or '').strip()
+            if not ja: continue
+            rd = (it.get('read') or it.get('reading') or it.get('reading_kana') or '').strip()
+            en = (it.get('en') or it.get('gloss') or '').strip()
+            out.append({ 'ja': ja, 'read': rd, 'en': en })
+        return out[:max_items]
+    except Exception:
+        return []
+
 def _extract_suggestions(text: str, exclude: set, max_items=30) -> List[Dict[str,str]]:
-    out = []
-    seen = set()
-    for line in text.splitlines()[-200:]:
-        if line.strip().startswith('Vocab:'): continue
-        # candidates = contiguous Katakana or Kanji tokens
-        for m in re.finditer(r"[\u30A0-\u30FF]+|[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF々〆ヵヶ]+[\wぁ-ゖァ-ヺー]*", line):
-            jp = m.group(0).strip()
-            if not jp or jp in seen or jp in exclude: continue
-            seen.add(jp)
-            rd = _reading_for(jp)
-            en = _jisho_best_gloss(jp)
-            out.append({"ja": jp, "read": rd, "en": en})
-            if len(out) >= max_items: return out
+    # Build from current Vocab: entries by semantic proximity (see_also) via Jisho
+    out: List[Dict[str,str]] = []
+    seen: set = set()
+    bases: List[str] = []
+    for line in text.splitlines():
+        if not line.startswith('Vocab:'): continue
+        parts = [p.strip() for p in line[6:].split('・') if p.strip()]
+        for p in parts:
+            if '(' in p:
+                b = p.split('(',1)[0].strip()
+                if b: bases.append(b)
+    def _similar_words(base: str) -> List[str]:
+        try:
+            import requests
+            url = f"https://jisho.org/api/v1/search/words?keyword={requests.utils.quote(base)}"
+            r = requests.get(url, timeout=3)
+            j = r.json(); data = j.get('data') or []
+            if not data: return []
+            sims: List[str] = []
+            for sense in (data[0].get('senses') or []):
+                for sa in (sense.get('see_also') or []):
+                    # keep only Japanese-ish entries (strip explanation)
+                    w = str(sa).split(' ')[0].strip()
+                    if _has_kana_or_kanji(w): sims.append(w)
+            return sims
+        except Exception:
+            return []
+    # Prefer internal provider if configured
+    internal = _internal_suggestions(bases, max_items)
+    if internal:
+        filtered: List[Dict[str,str]] = []
+        seen = set()
+        for it in internal:
+            ja = it.get('ja','').strip()
+            if not ja or ja in exclude or ja in seen: continue
+            if len(ja) > 14: continue
+            if not _has_kana_or_kanji(ja): continue
+            en = (it.get('en') or '').strip()
+            if not en: continue
+            rd = (it.get('read') or '').strip() or _reading_for(ja)
+            seen.add(ja)
+            filtered.append({ 'ja': ja, 'read': rd, 'en': en })
+            if len(filtered) >= max_items: break
+        return filtered
+
+    for base in bases:
+        if len(out) >= max_items: break
+        for w in _similar_words(base):
+            if len(out) >= max_items: break
+            if w in exclude or w in seen: continue
+            seen.add(w)
+            rd = _reading_for(w)
+            en = _jisho_best_gloss(w)
+            # Require a real English gloss; skip if none
+            if not en: continue
+            out.append({ 'ja': w, 'read': rd, 'en': en })
     return out
 
 @app.get("/api/overlay/suggestions")

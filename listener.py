@@ -95,7 +95,7 @@ REMOTE_ASR_TIMEOUT_MS = int(os.getenv("REMOTE_ASR_TIMEOUT_MS", "60000"))
 FORMAT_WORKERS = int(os.getenv("FORMAT_WORKERS", "4"))
 
 # Output line controls
-SHOW_VOCAB_LINE = os.getenv("SHOW_VOCAB_LINE", "false").lower() in {"1","true","yes","y"}
+SHOW_VOCAB_LINE = os.getenv("SHOW_VOCAB_LINE", "true").lower() in {"1","true","yes","y"}
 SHOW_DETAILS_LINE = os.getenv("SHOW_DETAILS_LINE", "false").lower() in {"1","true","yes","y"}
 SHOW_ASR_DEBUG = os.getenv("SHOW_ASR_DEBUG", "false").lower() in {"1","true","yes","y"}
 
@@ -946,14 +946,12 @@ def _gpt_request(jp_text: str) -> Optional[Dict]:
         "Content-Type": "application/json",
     }
     system = (
-        "You are a precise Japanese annotator and translator. "
-        "Given a single Japanese utterance, return STRICT JSON with ONLY these keys: "
-        "jp_html, en_html, vocabs, suggestions. "
-        "jp_html: EXACT utterance verbatim (no paraphrase/normalization). Preserve all characters and whitespace. Do NOT add parentheses or readings; only wrap spans <span data-id=\\\"vN\\\">…</span> for chosen vocab occurrences. "
-        "en_html: faithful, natural English translation covering the entire utterance. Wrap the English phrase corresponding to each vocab with the same <span data-id=\\\"vN\\\">…</span>. "
-        "vocabs: array of items ACTUALLY PRESENT in the input. Each: { id: 'v1', surface, reading_kana, meaning_en }. Prioritize nouns/verbs/adjectives/set phrases; avoid particles/aux unless semantically important. "
-        "suggestions: 3–8 related words or short replies (NOT appearing in vocabs.surface) suitable to say next in Japanese, each as { jp, reading_kana, en }. Keep concise and context-relevant; avoid duplication with vocabs.surface. "
-        "Constraints: Only annotate tokens containing Japanese script. If no Japanese in input, set vocabs=[] and suggestions may be empty. Every vocabs[i].id must appear at least once as <span data-id=\\\"vN\\\"> in BOTH jp_html and en_html. Keep glosses 1–5 words. VALID JSON only."
+        "You are a precise Japanese translator. "
+        "Given ONE Japanese utterance, respond with STRICT JSON only: { jp_html, en_html, suggestions }. "
+        "jp_html: EXACT verbatim of the input (no paraphrase/normalization). Preserve all characters and whitespace. No added readings, no extra symbols. "
+        "en_html: Faithful, natural English translation of the entire utterance. "
+        "suggestions: 3–8 short, on-topic words or brief replies in Japanese (single terms/very short phrases), each as { jp, reading_kana, en }. Keep concise; avoid duplicates. "
+        "Constraints: VALID JSON only (no markdown). If no Japanese present, suggestions may be empty."
     )
     user = {
         "utterance": jp_text,
@@ -1005,30 +1003,47 @@ def _strip_span_tags(s: str) -> str:
     except Exception:
         return s_no_tags
 
-def _render_four_lines(j: Dict) -> List[str]:
-    # build stable colors per id in vocabs order
-    ids = [v.get("id") for v in (j.get("vocabs") or []) if v.get("id")]
-    color_map = {}
-    for i, vid in enumerate(ids):
-        color_map[vid] = _PALETTE[i % len(_PALETTE)]
+def _build_vocab_line_from_jp(jp_html_text: str) -> str:
+    try:
+        # Strip HTML tags, tokenize, and build surf(reading、gloss) items
+        clean = re.sub(r"<[^>]+>", "", jp_html_text)
+        toks = []
+        try:
+            toks = list(tagger(html.unescape(clean)))
+        except Exception:
+            toks = []
+        items = []
+        seen = set()
+        for m in toks:
+            surf = m.surface
+            pos1 = getattr(m.feature, 'pos1', '')
+            if pos1 not in {'名詞','動詞','形容詞'}:
+                continue
+            if not (KANJI_RE.search(surf) or has_kata_letter(surf)):
+                continue
+            if surf in seen:
+                continue
+            seen.add(surf)
+            rd = get_reading(m) or surf
+            rd = to_hira(rd)
+            gloss = best_gloss(surf) or ''
+            if gloss:
+                items.append(f"{html.escape(surf)}({html.escape(rd)}) — {html.escape(gloss)}")
+            else:
+                items.append(f"{html.escape(surf)}({html.escape(rd)})")
+            if len(items) >= GPT_MAX_VOCAB:
+                break
+        return "Vocab: " + (" ・ ".join(items) if items else "(none)")
+    except Exception:
+        return "Vocab: (none)"
 
+def _render_four_lines(j: Dict) -> List[str]:
+    # Plain JP/EN lines (no color spans)
     jp = j.get("jp_html") or html.escape(j.get("jp", "").strip())
     en = j.get("en_html") or ""
-    jp_c = _colorize_spans(jp, color_map)
-    en_c = _colorize_spans(en, color_map)
-    en_c = f"<span style=\"color:#888\">{en_c}</span>"
-
-    voc_items = []
-    for v in (j.get("vocabs") or []):
-        vid = v.get("id")
-        surf = v.get("surface") or ""
-        rd = v.get("reading_kana") or ""
-        mean = v.get("meaning_en") or ""
-        color = color_map.get(vid, "#888")
-        voc_items.append(
-            f"<span data-id=\"{html.escape(vid or '')}\" style=\"color:{color}\">{html.escape(surf)}({html.escape(rd)}) — {html.escape(mean)}</span>"
-        )
-    vocab_line = "Vocab: " + (" ・ ".join(voc_items) if voc_items else "(none)")
+    jp_c = jp
+    en_c = f"<span style=\"color:#888\">{en}</span>"
+    vocab_line = _build_vocab_line_from_jp(jp)
 
     # Line 4 composition
     discourse = [str(x) for x in (j.get("discourse") or []) if x]
@@ -1203,8 +1218,8 @@ def _render_four_lines(j: Dict) -> List[str]:
         line4 = "<br>".join(p for p in parts if p)
 
     lines: List[str] = [jp_c, en_c]
-    if SHOW_VOCAB_LINE:
-        lines.append(vocab_line)
+    # Always append vocab line to feed the left sidebar; can be disabled via UI if desired
+    lines.append(vocab_line)
     # No extra details line appended
     return lines
 
@@ -1436,11 +1451,12 @@ def main():
                         except Exception:
                             out_lines = []
                 else:
-                    # Fallback minimal lines so UI is not blank
+                    # Fallback minimal lines so UI is not blank, include local vocab line
                     try:
                         jp_html = html.escape(text)
                         en_html = ""
-                        out_lines = [jp_html, en_html]
+                        vocab_line = _build_vocab_line_from_jp(jp_html)
+                        out_lines = [jp_html, en_html, vocab_line]
                     except Exception:
                         out_lines = []
             if not out_lines:
