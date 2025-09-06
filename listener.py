@@ -1216,37 +1216,42 @@ def main():
                     continue
             out_lines: List[str] = []
             if not re.search(r"[ぁ-んァ-ヴ一-龯]", text):
-                out_lines = [html.escape(text), f"<span style=\"color:#888\">{html.escape(text)}</span>", "", ""]
-            else:
-                # Rate limit GPT calls globally
-                do_gpt = True
+                # Non-Japanese: use GPT EN as line 2 by sending as-is; line 1 mirrors
+                payload_text = _sanitize_for_gpt(text) or text
+                # Rate limit with blocking wait to avoid fallback output
                 with gpt_lock:
-                    if (now - GPT_LAST_TS["t"]) * 1000.0 < GPT_RATE_LIMIT_MS:
-                        do_gpt = False
-                    else:
-                        GPT_LAST_TS["t"] = now
-                j = None
-                if do_gpt:
-                    payload_text = _sanitize_for_gpt(text)
-                    if payload_text:
-                        j = _gpt_request(payload_text)
+                    now2 = time.time()
+                    elapsed_ms = (now2 - GPT_LAST_TS["t"]) * 1000.0
+                    wait_ms = GPT_RATE_LIMIT_MS - elapsed_ms
+                    if wait_ms > 0:
+                        time.sleep(wait_ms/1000.0)
+                    GPT_LAST_TS["t"] = time.time()
+                j = _gpt_request(payload_text)
                 if j:
                     try:
-                        jp_model = j.get("jp_html") or ""
-                        if JP_VERBATIM and jp_model:
-                            content = _strip_span_tags(jp_model)
-                            if content != text:
-                                j = dict(j)
-                                j["jp_html"] = html.escape(text)
                         out_lines = _render_four_lines(j)
                     except Exception:
                         out_lines = []
+            else:
+                # Japanese present: always produce GPT output (block for rate limit)
+                payload_text = _sanitize_for_gpt(text)
+                if payload_text:
+                    with gpt_lock:
+                        now2 = time.time()
+                        elapsed_ms = (now2 - GPT_LAST_TS["t"]) * 1000.0
+                        wait_ms = GPT_RATE_LIMIT_MS - elapsed_ms
+                        if wait_ms > 0:
+                            time.sleep(wait_ms/1000.0)
+                        GPT_LAST_TS["t"] = time.time()
+                    j = _gpt_request(payload_text)
+                    if j:
+                        try:
+                            out_lines = _render_four_lines(j)
+                        except Exception:
+                            out_lines = []
             if not out_lines:
-                if JP_VERBATIM:
-                    out_lines = [html.escape(text)]
-                else:
-                    annotated = annotate_text(text)
-                    out_lines = [annotated]
+                # If GPT failed or returned nothing, skip this utterance entirely
+                continue
             # Drop empty line4 if it has no content (just in case)
             if len(out_lines) == 4 and (not out_lines[-1] or out_lines[-1].strip() == ""):
                 pass
