@@ -1,0 +1,23 @@
+# Environment
+.env
+
+# Runtime outputs
+transcript.txt
+waveform.json
+dict_cache.sqlite
+.installed
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual envs
+.venv/
+venv/
+
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/
