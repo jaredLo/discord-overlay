@@ -832,6 +832,62 @@ def append_transcript(text: str):
     with open(TRANSCRIPT_OUT, "a", encoding="utf-8") as f:
         f.write(text + "\n")
 
+# =============== Suggestions persistence (for right sidebar) ===============
+SUGGESTIONS_OUT = "suggestions.json"
+
+def _enrich_suggestion_fields(jp: str, rd: str, en: str) -> (str, str):
+    try:
+        rd_out = rd
+        if not rd_out:
+            toks = list(tagger(jp))
+            if toks:
+                kana = []
+                for m in toks:
+                    k = get_reading(m)
+                    kana.append(k if k else m.surface)
+                rd_out = to_hira("".join(kana))
+            else:
+                rd_out = to_hira(jp)
+        en_out = en or (best_gloss(jp) or "")
+        return rd_out, en_out
+    except Exception:
+        return rd, en
+
+def update_suggestions(items):
+    """Append new suggestions to suggestions.json, de-duplicated by jp string."""
+    try:
+        import json as _json
+        existing = []
+        try:
+            with open(SUGGESTIONS_OUT, "r", encoding="utf-8") as f:
+                existing = _json.load(f) or []
+        except Exception:
+            existing = []
+        new_items = []
+        batch_seen = set()
+        now_ts = time.time()
+        for it in (items or []):
+            jp = (it.get("jp") or it.get("ja") or "").strip()
+            rd = (it.get("reading_kana") or it.get("reading") or "").strip()
+            en = (it.get("en") or it.get("meaning_en") or "").strip()
+            if not jp:
+                continue
+            # avoid duplicates within the same batch only
+            if jp in batch_seen:
+                continue
+            batch_seen.add(jp)
+            rd2, en2 = _enrich_suggestion_fields(jp, rd, en)
+            new_items.append({"jp": jp, "reading_kana": rd2 or "", "en": en2 or "", "ts": now_ts})
+        if not new_items:
+            return
+        out = (existing + new_items)[-800:]
+        tmp = SUGGESTIONS_OUT + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json.dump(out, f, ensure_ascii=False)
+        os.replace(tmp, SUGGESTIONS_OUT)
+    except Exception:
+        pass
+
 # =============== GPT formatter (annotation + translation) ===============
 def _gpt_request(jp_text: str) -> Optional[Dict]:
     if not USE_GPT_FORMATTER:
@@ -844,22 +900,12 @@ def _gpt_request(jp_text: str) -> Optional[Dict]:
     system = (
         "You are a precise Japanese annotator and translator. "
         "Given a single Japanese utterance, return STRICT JSON with ONLY these keys: "
-        "jp_html, en_html, vocabs, discourse, connectives, contextual_vocab, personal_vocab, tense_cheat, compliments, mood, mood_phrases, fallback, tips. "
-        "jp_html: MUST be the exact ASR utterance verbatim (no paraphrase, no normalization, no added or removed characters, no compression). Preserve all whitespace, punctuation, elongated characters. Do NOT add parentheses or readings in jp_html. You may only wrap spans: wrap each chosen vocab occurrence with <span data-id=\\\"vN\\\">…</span> so ids align with English and vocab list. "
-        "en_html: Faithful, natural English translation covering the entire utterance. Wrap the English phrase corresponding to each vocab with the same <span data-id=\\\"vN\\\">…</span>. "
-        "vocabs: Array of items actually present in input. Each: { id: 'v1', surface, reading_kana, meaning_en }. Prioritize nouns, verbs, adjectives, set phrases, counters; avoid particles/aux unless semantically important. "
-        "discourse: 1–3 discourse markers appropriate to the context (e.g., ところで, ちなみに, それなら, それで, でも). "
-        "connectives: 1–3 connectives appropriate to the context (e.g., しかし, なので, つまり, それに). "
-        "contextual_vocab: exactly 3 items { surface, reading_kana, meaning_en } relevant to the current topic; HOWEVER if the utterance asks where/when/what/time-of-year, replace these with relative-time examples such as 二年前, 二週間前, 三ヶ月前 (with readings/meanings). "
-        "personal_vocab: exactly 3 items from the user's profile (motorcycle, programmer/job in software, freestyle swimming/watersports, Malaysian identity), as { surface, reading_kana, meaning_en }. "
-        "tense_cheat: main action verb (or best candidate) with BOTH forms and readings: { present_polite, present_polite_reading, past_polite, past_polite_reading, present_casual, present_casual_reading, past_casual, past_casual_reading }. "
-        "compliments: if appropriate to compliment, 3 short options as [{ jp, reading_kana, en }]. "
-        "mood: optional short label of detected mood (e.g., encouraging/empathetic), and mood_phrases: 3 short options as [{ jp, reading_kana, en }]. "
-        "fallback: a single concise, polite rescue phrase suited to the context: { jp, reading_kana, en }. "
-        "tips: 1–2 concise reply suggestions in Japanese (optionally brief EN gloss). "
-        "Constraints: No invented content. Only annotate tokens containing Japanese script (Hiragana/Katakana/Kanji). If the utterance contains no Japanese characters, set vocabs=[], set en_html equal to jp_html (the same text), and leave other optional fields minimal. Every vocabs[i].id must appear at least once as <span data-id=\\\"vN\\\"> in BOTH jp_html and en_html. Keep outputs concise; glosses 1–5 words. "
-        "If compress_elongations=true, you may shorten extreme ー/〜 runs; otherwise preserve as written. In all cases, jp_html text content must remain identical to the ASR utterance (spans only). "
-        "Select up to max_vocab items for jp/en spans. Respond with VALID JSON only—no Markdown, no extra text."
+        "jp_html, en_html, vocabs, suggestions. "
+        "jp_html: EXACT utterance verbatim (no paraphrase/normalization). Preserve all characters and whitespace. Do NOT add parentheses or readings; only wrap spans <span data-id=\\\"vN\\\">…</span> for chosen vocab occurrences. "
+        "en_html: faithful, natural English translation covering the entire utterance. Wrap the English phrase corresponding to each vocab with the same <span data-id=\\\"vN\\\">…</span>. "
+        "vocabs: array of items ACTUALLY PRESENT in the input. Each: { id: 'v1', surface, reading_kana, meaning_en }. Prioritize nouns/verbs/adjectives/set phrases; avoid particles/aux unless semantically important. "
+        "suggestions: 3–8 related words or short replies (NOT appearing in vocabs.surface) suitable to say next in Japanese, each as { jp, reading_kana, en }. Keep concise and context-relevant; avoid duplication with vocabs.surface. "
+        "Constraints: Only annotate tokens containing Japanese script. If no Japanese in input, set vocabs=[] and suggestions may be empty. Every vocabs[i].id must appear at least once as <span data-id=\\\"vN\\\"> in BOTH jp_html and en_html. Keep glosses 1–5 words. VALID JSON only."
     )
     user = {
         "utterance": jp_text,
@@ -1111,8 +1157,7 @@ def _render_four_lines(j: Dict) -> List[str]:
     lines: List[str] = [jp_c, en_c]
     if SHOW_VOCAB_LINE:
         lines.append(vocab_line)
-    if SHOW_DETAILS_LINE:
-        lines.append(line4)
+    # No extra details line appended
     return lines
 
 # =============== Sanitizers for GPT (keeps JP verbatim for display) ===============
@@ -1230,6 +1275,11 @@ def main():
                 if j:
                     try:
                         out_lines = _render_four_lines(j)
+                        if SHOW_DETAILS_LINE:
+                            try:
+                                update_suggestions(j.get("suggestions") or [])
+                            except Exception:
+                                pass
                     except Exception:
                         out_lines = []
             else:
@@ -1247,6 +1297,11 @@ def main():
                     if j:
                         try:
                             out_lines = _render_four_lines(j)
+                            if SHOW_DETAILS_LINE:
+                                try:
+                                    update_suggestions(j.get("suggestions") or [])
+                                except Exception:
+                                    pass
                         except Exception:
                             out_lines = []
             if not out_lines:

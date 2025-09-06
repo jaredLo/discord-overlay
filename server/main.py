@@ -11,8 +11,30 @@ from fastapi.responses import JSONResponse
 
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# --- load .env to pick up SHOW_DETAILS_LINE and others ---
+def _load_env_file(path: Path):
+    try:
+        if not path.exists():
+            return
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip(); v = v.strip()
+            if k and k not in os.environ:
+                os.environ[k] = v
+    except Exception:
+        pass
+
+# try project .env
+_load_env_file(ROOT / ".env")
 TRANSCRIPT_FILE = ROOT / "transcript.txt"
 WAVEFORM_FILE = ROOT / "waveform.json"
+SUGGESTIONS_FILE = ROOT / "suggestions.json"
 
 listener_proc: Optional[subprocess.Popen] = None
 
@@ -94,18 +116,21 @@ def health():
         lw = WAVEFORM_FILE.stat().st_mtime if WAVEFORM_FILE.exists() else None
     except Exception:
         lw = None
+    show_details = (os.getenv("SHOW_DETAILS_LINE", "false").lower() in {"1","true","yes","y"})
     return {
         "status": "ok",
         "listener_running": (listener_proc is not None and listener_proc.poll() is None),
         "transcript_mtime": lt,
         "waveform_mtime": lw,
+        "show_details": show_details,
     }
 
 
 @app.get("/api/overlay/transcript")
 def get_transcript():
-    html = _read_text(TRANSCRIPT_FILE)
-    return JSONResponse({"html": html})
+    text = _read_text(TRANSCRIPT_FILE)
+    # For compatibility, return both raw text and html alias
+    return JSONResponse({"text": text, "html": text})
 
 
 @app.get("/api/overlay/waveform")
@@ -113,3 +138,23 @@ def get_waveform():
     data = _read_wave(WAVEFORM_FILE)
     return JSONResponse({"data": data})
 
+
+@app.get("/api/overlay/suggestions")
+def get_suggestions():
+    try:
+        import json
+        if SUGGESTIONS_FILE.exists():
+            arr = json.loads(SUGGESTIONS_FILE.read_text(encoding="utf-8"))
+            # normalize keys
+            out = []
+            for it in arr:
+                jp = (it.get("jp") or it.get("ja") or "").strip()
+                rd = (it.get("reading_kana") or it.get("reading") or "").strip()
+                en = (it.get("en") or it.get("meaning_en") or "").strip()
+                ts = it.get("ts")
+                if jp:
+                    out.append({"ja": jp, "read": rd, "en": en, "ts": ts})
+            return JSONResponse({"items": out[-300:]})
+    except Exception:
+        pass
+    return JSONResponse({"items": []})

@@ -23,7 +23,16 @@
           "http://localhost/*"
         ]
       },
-      "clipboard": { "all": false, "writeText": true }
+      "clipboard": { "all": false, "writeText": true },
+      "fs": {
+        "all": false,
+        "writeFile": true,
+        "scope": ["**"]
+      },
+      "dialog": {
+        "all": false,
+        "save": true
+      }
     },
     "windows": [
       { "title": "Discord Overlay", "width": 800, "height": 560 }

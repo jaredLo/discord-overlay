@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^1.5.3",
-    "dompurify": "^3.2.6"
+    "dompurify": "^3.2.6",
+    "marked": "^12.0.2"
   }
 }
-

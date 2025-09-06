@@ -31,7 +31,7 @@ export class ApiClient {
     const r = await httpFetch(url, { method: 'GET' }).catch(async (e) => { await logClient(`Api.overlayTranscript error ${e?.message||e}`); throw e })
     await logClient(`Api.overlayTranscript status=${r.status} dur=${(nowMs()-t0).toFixed(0)}ms`)
     if (r.status >= 400) throw new Error(`Transcript failed ${r.status}`)
-    return r.data as { html: string }
+    return r.data as { text?: string, html?: string }
   }
 
   async overlayWaveform() {
@@ -42,5 +42,13 @@ export class ApiClient {
     if (r.status >= 400) throw new Error(`Waveform failed ${r.status}`)
     return r.data as { data: number[] }
   }
-}
 
+  async suggestions() {
+    const url = `${this.baseUrl}/api/overlay/suggestions`
+    const t0 = nowMs(); await logClient(`Api.suggestions start url=${url}`)
+    const r = await httpFetch(url, { method: 'GET' }).catch(async (e) => { await logClient(`Api.suggestions error ${e?.message||e}`); throw e })
+    await logClient(`Api.suggestions status=${r.status} dur=${(nowMs()-t0).toFixed(0)}ms`)
+    if (r.status >= 400) throw new Error(`Suggestions failed ${r.status}`)
+    return r.data as { items: Array<{ ja: string, read?: string, en?: string, ts?: number }> }
+  }
+}

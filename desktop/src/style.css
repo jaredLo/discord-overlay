@@ -4,10 +4,62 @@ body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, H
 button { cursor: pointer; }
 input, button, textarea { font-size: 14px; }
 
-.container { width: 100vw; height: 100vh; box-sizing: border-box; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
+.container { width: 100vw; height: 100vh; box-sizing: border-box; padding: 8px 10px; display: flex; flex-direction: row; gap: 8px; }
+.main { flex: 1 1 auto; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .panel { background: transparent; border: 1px solid rgba(255,255,255,0.05); border-radius: 8px; padding: 8px; }
 .transcript { flex: 1 1 auto; overflow: auto; }
 .transcript .content { font-size: 16px; line-height: 1.45; white-space: normal; }
+/* Prettify chat groups to match sidebar panel aesthetics */
+.transcript .content p,
+.transcript .content ul,
+.transcript .content ol {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 6px 0;
+}
+.transcript .content ul,
+.transcript .content ol { padding-left: 24px; }
+.transcript .content .ja-inline span { color: #ef4444 !important; font-weight: 700; }
+.transcript .content .reading-inline { color: #064e3b; font-weight: 700; }
 .wave { height: 100px; }
+.wave canvas { width: 100%; height: 100%; display: block; }
 .scroll-arrow { position: absolute; right: 16px; bottom: 140px; background: rgba(15,23,42,0.8); border: 1px solid rgba(255,255,255,0.08); border-radius: 999px; padding: 6px 10px; cursor: pointer; user-select: none; }
 
+/* Sidebar */
+.sidebar { position: relative; display: flex; flex-direction: column; gap: 8px; background: transparent; border: 1px solid rgba(255,255,255,0.05); border-radius: 8px; padding: 8px; overflow-x: hidden; overflow-y: visible; transition: width 120ms ease; height: 100%; }
+.sidebar-left { /* left rail specific tweaks */ }
+.sidebar-right { /* right rail specific tweaks */ }
+.sidebar-title { font-weight: 600; color: #cbd5e1; margin-bottom: 4px; }
+.sidebar small { color: #9ca3af; }
+.sidebar-toggle { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(15,23,42,0.95); border: 1px solid rgba(255,255,255,0.10); border-radius: 999px; width: 22px; height: 28px; display: flex; align-items: center; justify-content: center; cursor: pointer; user-select: none; font-size: 12px; }
+.sidebar-left .sidebar-toggle { right: -6px; }
+.sidebar-right .sidebar-toggle { left: -6px; }
+.sidebar-content { overflow: hidden; display: flex; flex-direction: column; gap: 8px; flex: 1 1 auto; min-height: 0; }
+
+/* Vocab list */
+.vocabs-header { display: flex; align-items: center; justify-content: space-between; }
+.vocabs-list { display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+.vocab-item { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px; border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; background: rgba(255,255,255,0.02); }
+.vocab-item { position: relative; }
+.vocab-ja { background: #ef4444; color: #ffffff; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
+.vocab-read { background: #064e3b; color: #ffffff; padding: 2px 6px; border-radius: 4px; font-weight: 500; }
+.vocab-en { background: #93c5fd; color: #111827; padding: 2px 6px; border-radius: 4px; }
+.vocab-count { background: #374151; color: #e5e7eb; padding: 1px 6px; border-radius: 999px; font-size: 11px; }
+
+/* Global hover bubble positioned near sidebar item (fixed) */
+.hover-bubble {
+  position: fixed;
+  max-width: 480px;
+  background: rgba(11,15,23,0.98);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+  color: #e5e7eb;
+  z-index: 2000;
+  white-space: pre-wrap;
+  pointer-events: none;
+  word-break: break-word;
+}
