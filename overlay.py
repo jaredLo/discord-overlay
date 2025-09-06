@@ -52,29 +52,65 @@ class Overlay(QWidget):
         self.wave = _Waveform()
         layout.addWidget(self.wave)
 
+        # Track file position and tail-follow state
+        self._last_size = 0
+        self._follow_tail = True
+
+        # Watch user scroll to toggle follow-tail
+        self.text.verticalScrollBar().valueChanged.connect(self._on_scroll)
+
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_text)
         self.timer.start(150)
         self.update_text()
 
+        # Independent waveform refresh timer so it’s not tied to text updates
+        self.wave_timer = QTimer(self)
+        self.wave_timer.timeout.connect(self.wave.refresh)
+        self.wave_timer.start(100)
+
     def update_text(self) -> None:
-        """Refresh overlay with annotated text."""
+        """Incrementally append new transcript without resetting scroll/selection."""
+        try:
+            st = TRANSCRIPT_FILE.stat()
+        except FileNotFoundError:
+            return
+
         sb = self.text.verticalScrollBar()
-        # Detect if user is already at bottom (within a small threshold)
         at_bottom_before = sb.value() >= sb.maximum() - 4
-        old_value = sb.value()
+        has_sel = self.text.textCursor().hasSelection()
 
-        lines = read_transcript().splitlines()
-        self.text.setHtml("<br><br>".join(lines))
+        # If file truncated (new session), reload all
+        if st.st_size < self._last_size:
+            data = read_transcript()
+            self.text.setHtml(data.replace("\n", "<br>"))
+            self._last_size = st.st_size
+        elif st.st_size > self._last_size:
+            with open(TRANSCRIPT_FILE, "r", encoding="utf-8") as f:
+                f.seek(self._last_size)
+                chunk = f.read()
+                self._last_size = st.st_size
+            if chunk:
+                # Append each new line as HTML; lines already contain HTML
+                for line in chunk.splitlines():
+                    if line == "":
+                        self.text.moveCursor(QTextCursor.End)
+                        self.text.insertHtml("<br>")
+                    else:
+                        self.text.moveCursor(QTextCursor.End)
+                        self.text.insertHtml(line + "<br>")
 
-        # Only auto-scroll if user was at bottom before refresh
-        if at_bottom_before:
+        # Auto-scroll only if user is at bottom and following tail and not selecting
+        if self._follow_tail and not has_sel and at_bottom_before:
             self.text.moveCursor(QTextCursor.End)
             sb.setValue(sb.maximum())
-        else:
-            # Keep previous scroll position so user can read older lines
-            sb.setValue(min(sb.maximum(), old_value))
 
+    def _on_scroll(self) -> None:
+        sb = self.text.verticalScrollBar()
+        # Consider within 8 px of bottom as at-bottom
+        at_bottom = sb.value() >= sb.maximum() - 8
+        # If user scrolls away from bottom, stop following
+        self._follow_tail = at_bottom
         # Refresh waveform
         self.wave.refresh()
 

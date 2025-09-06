@@ -76,19 +76,26 @@ ASR_BACKEND = os.getenv(
 CAPTURE_ALL = os.getenv("CAPTURE_ALL", "false").lower() in {"1","true","yes","y"}
 
 # GPT formatting (annotation + translation)
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-nano-2025-04-14")
 USE_GPT_FORMATTER = (os.getenv("USE_GPT_FORMATTER", "true").lower() in {"1","true","yes","y"}) and bool(OPENAI_API_KEY)
 GPT_COMPRESS_ELONG = os.getenv("GPT_COMPRESS_ELONGATIONS", "false").lower() in {"1","true","yes","y"}
 GPT_MAX_VOCAB = int(os.getenv("GPT_MAX_VOCAB", "10"))
+GPT_MAX_CHARS = int(os.getenv("GPT_MAX_CHARS", "280"))
+GPT_RATE_LIMIT_MS = int(os.getenv("GPT_RATE_LIMIT_MS", "600"))
+GPT_CLEAN_REPEATS = os.getenv("GPT_CLEAN_REPEATS", "true").lower() in {"1","true","yes","y"}
+GPT_SKIP_ON_REPEAT = os.getenv("GPT_SKIP_ON_REPEAT", "true").lower() in {"1","true","yes","y"}
 LINE4_TABLE_MODE = os.getenv("LINE4_TABLE_MODE", "false").lower() in {"1","true","yes","y"}
 JP_VERBATIM = os.getenv("JP_VERBATIM", "true").lower() in {"1","true","yes","y"}
 CHUNK_OVERLAP_MS = int(os.getenv("CHUNK_OVERLAP_MS", "200"))
-USE_FIXED_CHUNKING = os.getenv("USE_FIXED_CHUNKING", "true").lower() in {"1","true","yes","y"}
-FIXED_CHUNK_SEC = float(os.getenv("FIXED_CHUNK_SEC", "5.0"))
+DISABLE_OVERLAP = os.getenv("DISABLE_OVERLAP", "true").lower() in {"1","true","yes","y"}
+DISABLE_CARRY = os.getenv("DISABLE_CARRY", "true").lower() in {"1","true","yes","y"}
 ASR_WORKERS = int(os.getenv("ASR_WORKERS", "1"))
 REMOTE_ASR_TIMEOUT_MS = int(os.getenv("REMOTE_ASR_TIMEOUT_MS", "60000"))
 FORMAT_WORKERS = int(os.getenv("FORMAT_WORKERS", "4"))
-PREVIEW_ASR_IMMEDIATE = os.getenv("PREVIEW_ASR_IMMEDIATE", "true").lower() in {"1","true","yes","y"}
+
+# Output line controls
+SHOW_VOCAB_LINE = os.getenv("SHOW_VOCAB_LINE", "false").lower() in {"1","true","yes","y"}
+SHOW_DETAILS_LINE = os.getenv("SHOW_DETAILS_LINE", "false").lower() in {"1","true","yes","y"}
 
 # Output
 TRANSCRIPT_OUT = "transcript.txt"
@@ -158,13 +165,13 @@ def _wave_flush(buf: List[int]):
         pass
 
 def chunker_thread(frames_q: queue.Queue, out_chunk_q: queue.Queue, wave_q: queue.Queue):
-    # Use the same logic as utterance_chunks but stateful over a queue
+    # Use VAD-based logic to segment utterances; accuracy over latency
     vad = webrtcvad.Vad(VAD_LEVEL)
     frame_len = int(SAMPLE_RATE * FRAME_MS / 1000)
     hang_frames = int(SILENCE_HANG_MS / FRAME_MS)
     max_frames = int(MAX_CHUNK_SEC * 1000 / FRAME_MS)
     min_frames = int(MIN_CHUNK_SEC * 1000 / FRAME_MS)
-    overlap_frames = max(0, int(CHUNK_OVERLAP_MS / FRAME_MS))
+    overlap_frames = 0 if DISABLE_OVERLAP else max(0, int(CHUNK_OVERLAP_MS / FRAME_MS))
 
     buf = np.zeros(0, dtype=np.float32)
     seg: List[np.ndarray] = []
@@ -197,29 +204,6 @@ def chunker_thread(frames_q: queue.Queue, out_chunk_q: queue.Queue, wave_q: queu
         f_in = frames_q.get()
         buf = np.concatenate([buf, f_in])
 
-        # Fixed-size chunking: emit every FIXED_CHUNK_SEC regardless of speech
-        if USE_FIXED_CHUNKING:
-            fixed_frames = max(1, int(FIXED_CHUNK_SEC * 1000 / FRAME_MS))
-            target_samples = fixed_frames * frame_len
-            while len(buf) >= target_samples:
-                audio = buf[:target_samples]
-                # Prepare next buffer with optional overlap
-                if overlap_frames > 0:
-                    keep = target_samples - overlap_frames * frame_len
-                    if keep < 0:
-                        keep = 0
-                    buf = buf[keep:]
-                else:
-                    buf = buf[target_samples:]
-                try:
-                    out_chunk_q.put_nowait(audio)
-                except queue.Full:
-                    try:
-                        _ = out_chunk_q.get_nowait()
-                        out_chunk_q.put_nowait(audio)
-                    except Exception:
-                        pass
-            continue
         while len(buf) >= frame_len:
             f = buf[:frame_len]; buf = buf[frame_len:]
             b = (np.clip(f, -1, 1) * 32767).astype(np.int16).tobytes()
@@ -228,18 +212,18 @@ def chunker_thread(frames_q: queue.Queue, out_chunk_q: queue.Queue, wave_q: queu
                 speaking = True
                 hang = hang_frames
                 silence_run = 0
-                if not seg and overlap_prepend_frames:
+                if not DISABLE_OVERLAP and (not seg and overlap_prepend_frames):
                     seg.extend(overlap_prepend_frames)
                     overlap_prepend_frames = []
                 seg.append(f)
                 if len(seg) >= max_frames:
                     audio = np.concatenate(seg, axis=0); seg = []
-                    if overlap_frames > 0:
+                    if not DISABLE_OVERLAP and overlap_frames > 0:
                         k = min(overlap_frames, len(audio) // frame_len)
                         if k > 0:
                             tail = audio[-k*frame_len:]
                             overlap_prepend_frames = [tail[i*frame_len:(i+1)*frame_len] for i in range(k)]
-                    if carry.size:
+                    if not DISABLE_CARRY and carry.size:
                         audio = np.concatenate([carry, audio]); carry = np.zeros(0, dtype=np.float32)
                     if len(audio) >= min_frames * frame_len:
                         # Non-blocking put to prevent backpressure stalls
@@ -258,15 +242,16 @@ def chunker_thread(frames_q: queue.Queue, out_chunk_q: queue.Queue, wave_q: queu
                         speaking = False
                         if seg:
                             audio = np.concatenate(seg, axis=0); seg = []
-                            if overlap_frames > 0:
+                            if not DISABLE_OVERLAP and overlap_frames > 0:
                                 k = min(overlap_frames, len(audio) // frame_len)
                                 if k > 0:
                                     tail = audio[-k*frame_len:]
                                     overlap_prepend_frames = [tail[i*frame_len:(i+1)*frame_len] for i in range(k)]
                             if len(audio) < min_frames * frame_len:
-                                carry = np.concatenate([carry, audio]) if carry.size else audio
+                                if not DISABLE_CARRY:
+                                    carry = np.concatenate([carry, audio]) if carry.size else audio
                             else:
-                                if carry.size:
+                                if not DISABLE_CARRY and carry.size:
                                     audio = np.concatenate([carry, audio]); carry = np.zeros(0, dtype=np.float32)
                                 try:
                                     out_chunk_q.put_nowait(audio)
@@ -278,7 +263,7 @@ def chunker_thread(frames_q: queue.Queue, out_chunk_q: queue.Queue, wave_q: queu
                                         pass
                 else:
                     silence_run += 1
-                    if carry.size and silence_run >= 3 * hang_frames:
+                    if not DISABLE_CARRY and carry.size and silence_run >= 3 * hang_frames:
                         if len(carry) >= min_flush_frames * frame_len:
                             try:
                                 out_chunk_q.put_nowait(carry)
@@ -306,7 +291,7 @@ def utterance_chunks(frames_iter):
     hang_frames = int(SILENCE_HANG_MS / FRAME_MS)
     max_frames = int(MAX_CHUNK_SEC * 1000 / FRAME_MS)
     min_frames = int(MIN_CHUNK_SEC * 1000 / FRAME_MS)
-    overlap_frames = max(0, int(CHUNK_OVERLAP_MS / FRAME_MS))
+    overlap_frames = 0 if DISABLE_OVERLAP else max(0, int(CHUNK_OVERLAP_MS / FRAME_MS))
 
     buf = np.zeros(0, dtype=np.float32)
     seg = []
@@ -333,20 +318,20 @@ def utterance_chunks(frames_iter):
                 speaking = True
                 hang = hang_frames
                 silence_run = 0
-                if not seg and overlap_prepend_frames:
+                if not DISABLE_OVERLAP and (not seg and overlap_prepend_frames):
                     seg.extend(overlap_prepend_frames)
                     overlap_prepend_frames = []
                 seg.append(f)
                 if len(seg) >= max_frames:
                     # compute overlap tail before clearing seg
                     audio = np.concatenate(seg, axis=0); seg = []
-                    if overlap_frames > 0:
+                    if not DISABLE_OVERLAP and overlap_frames > 0:
                         k = min(overlap_frames, len(audio) // frame_len)
                         if k > 0:
                             tail = audio[-k*frame_len:]
                             overlap_prepend_frames = [tail[i*frame_len:(i+1)*frame_len] for i in range(k)]
-                    # prepend any carried short audio so we don't lose it
-                    if carry.size:
+                    # prepend any carried short audio so we don't lose it (unless disabled)
+                    if not DISABLE_CARRY and carry.size:
                         audio = np.concatenate([carry, audio]); carry = np.zeros(0, dtype=np.float32)
                     if len(audio) >= min_frames * frame_len:
                         yield audio
@@ -357,23 +342,24 @@ def utterance_chunks(frames_iter):
                         speaking = False
                         if seg:
                             audio = np.concatenate(seg, axis=0); seg = []
-                            if overlap_frames > 0:
+                            if not DISABLE_OVERLAP and overlap_frames > 0:
                                 k = min(overlap_frames, len(audio) // frame_len)
                                 if k > 0:
                                     tail = audio[-k*frame_len:]
                                     overlap_prepend_frames = [tail[i*frame_len:(i+1)*frame_len] for i in range(k)]
-                            # if too short, carry it forward instead of dropping
                             if len(audio) < min_frames * frame_len:
-                                carry = np.concatenate([carry, audio]) if carry.size else audio
+                                if not DISABLE_CARRY:
+                                    carry = np.concatenate([carry, audio]) if carry.size else audio
+                                # if carry disabled, drop too-short tail
                             else:
-                                if carry.size:
+                                if not DISABLE_CARRY and carry.size:
                                     audio = np.concatenate([carry, audio]); carry = np.zeros(0, dtype=np.float32)
                                 yield audio
                 else:
                     # accumulating silence while not speaking
                     silence_run += 1
                     # if we had a short carried segment and we've been silent long enough, flush it
-                    if carry.size and silence_run >= 3 * hang_frames:
+                    if not DISABLE_CARRY and carry.size and silence_run >= 3 * hang_frames:
                         if len(carry) >= min_flush_frames * frame_len:
                             yield carry
                         # regardless, clear carry to avoid indefinite growth
@@ -1122,7 +1108,51 @@ def _render_four_lines(j: Dict) -> List[str]:
         # Stack each section on its own line for readability
         line4 = "<br>".join(p for p in parts if p)
 
-    return [jp_c, en_c, vocab_line, line4]
+    lines: List[str] = [jp_c, en_c]
+    if SHOW_VOCAB_LINE:
+        lines.append(vocab_line)
+    if SHOW_DETAILS_LINE:
+        lines.append(line4)
+    return lines
+
+# =============== Sanitizers for GPT (keeps JP verbatim for display) ===============
+def _collapse_long_runs(s: str, max_run: int = 12) -> str:
+    # Limit long runs of the same character (e.g., ーーー or repeated kana)
+    return re.sub(r"(.)\1{" + str(max_run) + r",}", lambda m: m.group(1) * max_run, s)
+
+def _collapse_repeated_phrases(s: str, min_len: int = 2, max_len: int = 8, keep: int = 3) -> str:
+    out = s
+    try:
+        for n in range(max_len, min_len-1, -1):
+            pattern = re.compile(r"((?:.{" + str(n) + r"}))\1{3,}")
+            out = pattern.sub(lambda m: m.group(1) * keep, out)
+    except Exception:
+        return s
+    return out
+
+def _repetition_score(s: str) -> float:
+    if not s:
+        return 0.0
+    # crude: compression ratio proxy via removing duplicates of 3+ char phrases
+    cleaned = _collapse_repeated_phrases(_collapse_long_runs(s), 2, 8, 1)
+    try:
+        return len(s) / max(1, len(cleaned))
+    except Exception:
+        return 1.0
+
+def _sanitize_for_gpt(s: str) -> Optional[str]:
+    if not s:
+        return s
+    t = s
+    if GPT_CLEAN_REPEATS:
+        t = _collapse_long_runs(t)
+        t = _collapse_repeated_phrases(t)
+    if len(t) > GPT_MAX_CHARS:
+        t = t[:GPT_MAX_CHARS]
+    if GPT_SKIP_ON_REPEAT and _repetition_score(s) >= 4.0:
+        # too repetitive; skip GPT to avoid tokens
+        return None
+    return t
 
 # =============== Main ===============
 def main():
@@ -1155,9 +1185,6 @@ def main():
     # Stage 1: chunking + waveform flushing
     threading.Thread(target=chunker_thread, args=(q, chunk_q, wave_q), daemon=True).start()
 
-    # Shared preview cache for dedup between ASR preview and formatted output
-    preview_cache = {"text": "", "t": 0.0}
-
     # Stage 2: ASR uploader/decoder
     def asr_worker():
         while True:
@@ -1167,13 +1194,6 @@ def main():
             except Exception:
                 txt = ""
             if txt:
-                # Immediate preview of verbatim JP without waiting for GPT
-                if PREVIEW_ASR_IMMEDIATE:
-                    ts = time.time()
-                    preview_cache["text"] = txt
-                    preview_cache["t"] = ts
-                    append_transcript(html.escape(txt))
-                    print(html.escape(txt))
                 text_q.put(txt)
 
     # Start N ASR workers for concurrency so a slow request won't block new chunks
@@ -1181,6 +1201,9 @@ def main():
         threading.Thread(target=asr_worker, daemon=True).start()
 
     # Stage 3: Formatter/writer
+    GPT_LAST_TS = {"t": 0.0}
+    gpt_lock = threading.Lock()
+
     def formatter_worker():
         last_text = ""; last_t = 0.0
         while True:
@@ -1195,7 +1218,18 @@ def main():
             if not re.search(r"[ぁ-んァ-ヴ一-龯]", text):
                 out_lines = [html.escape(text), f"<span style=\"color:#888\">{html.escape(text)}</span>", "", ""]
             else:
-                j = _gpt_request(text)
+                # Rate limit GPT calls globally
+                do_gpt = True
+                with gpt_lock:
+                    if (now - GPT_LAST_TS["t"]) * 1000.0 < GPT_RATE_LIMIT_MS:
+                        do_gpt = False
+                    else:
+                        GPT_LAST_TS["t"] = now
+                j = None
+                if do_gpt:
+                    payload_text = _sanitize_for_gpt(text)
+                    if payload_text:
+                        j = _gpt_request(payload_text)
                 if j:
                     try:
                         jp_model = j.get("jp_html") or ""
@@ -1209,18 +1243,10 @@ def main():
                         out_lines = []
             if not out_lines:
                 if JP_VERBATIM:
-                    out_lines = [html.escape(text), "", "", ""]
+                    out_lines = [html.escape(text)]
                 else:
                     annotated = annotate_text(text)
-                    out_lines = [annotated, "", "", ""]
-            # If we recently printed a preview identical to line 1, drop the first line to avoid duplicates
-            if out_lines and preview_cache["text"]:
-                try:
-                    if (time.time() - preview_cache["t"]) <= 10.0:
-                        if _strip_span_tags(out_lines[0]) == preview_cache["text"]:
-                            out_lines = out_lines[1:]
-                except Exception:
-                    pass
+                    out_lines = [annotated]
             # Drop empty line4 if it has no content (just in case)
             if len(out_lines) == 4 and (not out_lines[-1] or out_lines[-1].strip() == ""):
                 pass
