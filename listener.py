@@ -16,6 +16,7 @@ import requests
 from io import BytesIO
 import wave
 import html
+import requests
 
 # =============== .env loader (lightweight) ===============
 def _load_env_file(path: str = ".env"):
@@ -37,6 +38,9 @@ def _load_env_file(path: str = ".env"):
         pass
 
 _load_env_file()
+
+# Reuse a single HTTP session for keep-alive
+_HTTP = requests.Session()
 
 # =============== Config (accuracy-first, M1/8GB) ===============
 TARGET_DEVICE_SUBSTR = os.getenv("TARGET_DEVICE", "BlackHole")
@@ -61,6 +65,12 @@ NUM_WORKERS = int(os.getenv("NUM_WORKERS", "1"))
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "faster-whisper")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 USE_OPENAI = (WHISPER_MODEL.lower() == "whisper-1" and bool(OPENAI_API_KEY))
+REMOTE_ASR_URL = os.getenv("REMOTE_ASR_URL", "http://192.168.1.12:8585/api/transcribe")
+# Backend selector: remote | openai | local
+ASR_BACKEND = os.getenv(
+    "ASR_BACKEND",
+    ("remote" if REMOTE_ASR_URL else ("openai" if USE_OPENAI else "local"))
+).lower()
 
 # Capture-all mode
 CAPTURE_ALL = os.getenv("CAPTURE_ALL", "false").lower() in {"1","true","yes","y"}
@@ -70,9 +80,20 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
 USE_GPT_FORMATTER = (os.getenv("USE_GPT_FORMATTER", "true").lower() in {"1","true","yes","y"}) and bool(OPENAI_API_KEY)
 GPT_COMPRESS_ELONG = os.getenv("GPT_COMPRESS_ELONGATIONS", "false").lower() in {"1","true","yes","y"}
 GPT_MAX_VOCAB = int(os.getenv("GPT_MAX_VOCAB", "10"))
+LINE4_TABLE_MODE = os.getenv("LINE4_TABLE_MODE", "false").lower() in {"1","true","yes","y"}
+JP_VERBATIM = os.getenv("JP_VERBATIM", "true").lower() in {"1","true","yes","y"}
+CHUNK_OVERLAP_MS = int(os.getenv("CHUNK_OVERLAP_MS", "200"))
+USE_FIXED_CHUNKING = os.getenv("USE_FIXED_CHUNKING", "true").lower() in {"1","true","yes","y"}
+FIXED_CHUNK_SEC = float(os.getenv("FIXED_CHUNK_SEC", "5.0"))
+ASR_WORKERS = int(os.getenv("ASR_WORKERS", "1"))
+REMOTE_ASR_TIMEOUT_MS = int(os.getenv("REMOTE_ASR_TIMEOUT_MS", "60000"))
+FORMAT_WORKERS = int(os.getenv("FORMAT_WORKERS", "4"))
+PREVIEW_ASR_IMMEDIATE = os.getenv("PREVIEW_ASR_IMMEDIATE", "true").lower() in {"1","true","yes","y"}
 
 # Output
 TRANSCRIPT_OUT = "transcript.txt"
+WAVEFORM_OUT = "waveform.json"   # rolling amplitude data for overlay
+WAVEFORM_LEN = 1000               # points kept in file
 SHOW_SENTENCE_EN = True           # append DeepL line per utterance if API key present
 MIN_CHARS_FOR_DEEPL = 6           # skip super-short blips
 USER_DICT_CSV = "user_dict.csv"   # optional overrides: surface,reading,english
@@ -97,17 +118,177 @@ def pick_input(substr):
     raise RuntimeError(f"No input matching '{substr}'. Check Audio MIDI routing and system output device.")
 
 # =============== Audio capture ===============
-def audio_thread(dev_index, out_q: queue.Queue):
+def audio_thread(dev_index, out_q: queue.Queue, wave_q: queue.Queue):
     blocksize = int(SAMPLE_RATE * FRAME_MS / 1000)
+
     def cb(indata, frames, time_info, status):
         if status:
             print(status, file=sys.stderr)
         mono = indata[:, :CHANNELS_IN].mean(axis=1).astype(np.float32)
-        out_q.put(mono.copy())
+        # Non-blocking put to avoid starving audio callback if downstream is slow
+        try:
+            out_q.put_nowait(mono.copy())
+        except queue.Full:
+            try:
+                _ = out_q.get_nowait()  # drop oldest frame
+                out_q.put_nowait(mono.copy())
+            except Exception:
+                pass
+        # Downsample block into ~50 points per callback and push to non-blocking queue
+        try:
+            step = max(1, len(mono) // 50)
+            sl = mono[::step]
+            sl = np.clip(sl, -1.0, 1.0)
+            vals = (sl * 100.0).astype(np.int16).tolist()  # -100..100
+            wave_q.put_nowait(vals)
+        except Exception:
+            pass
     with sd.InputStream(device=dev_index, channels=CHANNELS_IN, samplerate=SAMPLE_RATE,
                         blocksize=blocksize, dtype='float32', callback=cb):
         while True:
             time.sleep(1)
+
+def _wave_flush(buf: List[int]):
+    try:
+        tmp = WAVEFORM_OUT + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"data": buf[-WAVEFORM_LEN:]}, f, ensure_ascii=False)
+        os.replace(tmp, WAVEFORM_OUT)
+    except Exception:
+        pass
+
+def chunker_thread(frames_q: queue.Queue, out_chunk_q: queue.Queue, wave_q: queue.Queue):
+    # Use the same logic as utterance_chunks but stateful over a queue
+    vad = webrtcvad.Vad(VAD_LEVEL)
+    frame_len = int(SAMPLE_RATE * FRAME_MS / 1000)
+    hang_frames = int(SILENCE_HANG_MS / FRAME_MS)
+    max_frames = int(MAX_CHUNK_SEC * 1000 / FRAME_MS)
+    min_frames = int(MIN_CHUNK_SEC * 1000 / FRAME_MS)
+    overlap_frames = max(0, int(CHUNK_OVERLAP_MS / FRAME_MS))
+
+    buf = np.zeros(0, dtype=np.float32)
+    seg: List[np.ndarray] = []
+    carry = np.zeros(0, dtype=np.float32)
+    speaking = False
+    hang = 0
+    silence_run = 0
+    min_flush_frames = int(0.35 * 1000 / FRAME_MS)
+    overlap_prepend_frames: List[np.ndarray] = []
+
+    # Waveform aggregation and timed flush
+    wave_buf: List[int] = []
+    last_wave_write = time.time()
+
+    while True:
+        # Drain some wave samples without blocking
+        try:
+            while True:
+                vals = wave_q.get_nowait()
+                wave_buf.extend(vals)
+                if len(wave_buf) > WAVEFORM_LEN:
+                    wave_buf = wave_buf[-WAVEFORM_LEN:]
+        except queue.Empty:
+            pass
+        now = time.time()
+        if now - last_wave_write >= 0.1:
+            last_wave_write = now
+            _wave_flush(wave_buf)
+
+        f_in = frames_q.get()
+        buf = np.concatenate([buf, f_in])
+
+        # Fixed-size chunking: emit every FIXED_CHUNK_SEC regardless of speech
+        if USE_FIXED_CHUNKING:
+            fixed_frames = max(1, int(FIXED_CHUNK_SEC * 1000 / FRAME_MS))
+            target_samples = fixed_frames * frame_len
+            while len(buf) >= target_samples:
+                audio = buf[:target_samples]
+                # Prepare next buffer with optional overlap
+                if overlap_frames > 0:
+                    keep = target_samples - overlap_frames * frame_len
+                    if keep < 0:
+                        keep = 0
+                    buf = buf[keep:]
+                else:
+                    buf = buf[target_samples:]
+                try:
+                    out_chunk_q.put_nowait(audio)
+                except queue.Full:
+                    try:
+                        _ = out_chunk_q.get_nowait()
+                        out_chunk_q.put_nowait(audio)
+                    except Exception:
+                        pass
+            continue
+        while len(buf) >= frame_len:
+            f = buf[:frame_len]; buf = buf[frame_len:]
+            b = (np.clip(f, -1, 1) * 32767).astype(np.int16).tobytes()
+            is_sp = vad.is_speech(b, SAMPLE_RATE)
+            if is_sp:
+                speaking = True
+                hang = hang_frames
+                silence_run = 0
+                if not seg and overlap_prepend_frames:
+                    seg.extend(overlap_prepend_frames)
+                    overlap_prepend_frames = []
+                seg.append(f)
+                if len(seg) >= max_frames:
+                    audio = np.concatenate(seg, axis=0); seg = []
+                    if overlap_frames > 0:
+                        k = min(overlap_frames, len(audio) // frame_len)
+                        if k > 0:
+                            tail = audio[-k*frame_len:]
+                            overlap_prepend_frames = [tail[i*frame_len:(i+1)*frame_len] for i in range(k)]
+                    if carry.size:
+                        audio = np.concatenate([carry, audio]); carry = np.zeros(0, dtype=np.float32)
+                    if len(audio) >= min_frames * frame_len:
+                        # Non-blocking put to prevent backpressure stalls
+                        try:
+                            out_chunk_q.put_nowait(audio)
+                        except queue.Full:
+                            try:
+                                _ = out_chunk_q.get_nowait()  # drop oldest chunk
+                                out_chunk_q.put_nowait(audio)
+                            except Exception:
+                                pass
+            else:
+                if speaking:
+                    hang -= 1
+                    if hang <= 0:
+                        speaking = False
+                        if seg:
+                            audio = np.concatenate(seg, axis=0); seg = []
+                            if overlap_frames > 0:
+                                k = min(overlap_frames, len(audio) // frame_len)
+                                if k > 0:
+                                    tail = audio[-k*frame_len:]
+                                    overlap_prepend_frames = [tail[i*frame_len:(i+1)*frame_len] for i in range(k)]
+                            if len(audio) < min_frames * frame_len:
+                                carry = np.concatenate([carry, audio]) if carry.size else audio
+                            else:
+                                if carry.size:
+                                    audio = np.concatenate([carry, audio]); carry = np.zeros(0, dtype=np.float32)
+                                try:
+                                    out_chunk_q.put_nowait(audio)
+                                except queue.Full:
+                                    try:
+                                        _ = out_chunk_q.get_nowait()
+                                        out_chunk_q.put_nowait(audio)
+                                    except Exception:
+                                        pass
+                else:
+                    silence_run += 1
+                    if carry.size and silence_run >= 3 * hang_frames:
+                        if len(carry) >= min_flush_frames * frame_len:
+                            try:
+                                out_chunk_q.put_nowait(carry)
+                            except queue.Full:
+                                try:
+                                    _ = out_chunk_q.get_nowait()
+                                    out_chunk_q.put_nowait(carry)
+                                except Exception:
+                                    pass
+                        carry = np.zeros(0, dtype=np.float32)
 
 # =============== Light preprocess ===============
 def preprocess(audio: np.ndarray, target_dbfs=-22.0):
@@ -125,6 +306,7 @@ def utterance_chunks(frames_iter):
     hang_frames = int(SILENCE_HANG_MS / FRAME_MS)
     max_frames = int(MAX_CHUNK_SEC * 1000 / FRAME_MS)
     min_frames = int(MIN_CHUNK_SEC * 1000 / FRAME_MS)
+    overlap_frames = max(0, int(CHUNK_OVERLAP_MS / FRAME_MS))
 
     buf = np.zeros(0, dtype=np.float32)
     seg = []
@@ -134,6 +316,8 @@ def utterance_chunks(frames_iter):
     silence_run = 0
     # minimum duration (in frames) to flush a lone short segment on long silence
     min_flush_frames = int(0.35 * 1000 / FRAME_MS)
+    # tail frames to prepend to the next chunk to avoid boundary clipping
+    overlap_prepend_frames: List[np.ndarray] = []
 
     while True:
         f_in = next(frames_iter)
@@ -144,13 +328,23 @@ def utterance_chunks(frames_iter):
             b = (np.clip(f, -1, 1) * 32767).astype(np.int16).tobytes()
             is_sp = vad.is_speech(b, SAMPLE_RATE)
 
-            if is_sp or CAPTURE_ALL:
+            # Always use VAD to decide speech frames so we can split on silence
+            if is_sp:
                 speaking = True
                 hang = hang_frames
                 silence_run = 0
+                if not seg and overlap_prepend_frames:
+                    seg.extend(overlap_prepend_frames)
+                    overlap_prepend_frames = []
                 seg.append(f)
                 if len(seg) >= max_frames:
+                    # compute overlap tail before clearing seg
                     audio = np.concatenate(seg, axis=0); seg = []
+                    if overlap_frames > 0:
+                        k = min(overlap_frames, len(audio) // frame_len)
+                        if k > 0:
+                            tail = audio[-k*frame_len:]
+                            overlap_prepend_frames = [tail[i*frame_len:(i+1)*frame_len] for i in range(k)]
                     # prepend any carried short audio so we don't lose it
                     if carry.size:
                         audio = np.concatenate([carry, audio]); carry = np.zeros(0, dtype=np.float32)
@@ -163,6 +357,11 @@ def utterance_chunks(frames_iter):
                         speaking = False
                         if seg:
                             audio = np.concatenate(seg, axis=0); seg = []
+                            if overlap_frames > 0:
+                                k = min(overlap_frames, len(audio) // frame_len)
+                                if k > 0:
+                                    tail = audio[-k*frame_len:]
+                                    overlap_prepend_frames = [tail[i*frame_len:(i+1)*frame_len] for i in range(k)]
                             # if too short, carry it forward instead of dropping
                             if len(audio) < min_frames * frame_len:
                                 carry = np.concatenate([carry, audio]) if carry.size else audio
@@ -213,7 +412,7 @@ def _openai_transcribe(audio: np.ndarray) -> Optional[str]:
         "response_format": "json",
     }
     try:
-        r = requests.post(url, headers=headers, files=files, data=data, timeout=60)
+        r = _HTTP.post(url, headers=headers, files=files, data=data, timeout=REMOTE_ASR_TIMEOUT_MS/1000)
         r.raise_for_status()
         j = r.json()
         # new API returns { text: ... }
@@ -221,11 +420,81 @@ def _openai_transcribe(audio: np.ndarray) -> Optional[str]:
     except Exception:
         return None
 
+def _remote_transcribe(audio: np.ndarray) -> Optional[str]:
+    url = REMOTE_ASR_URL
+    if not url:
+        return None
+    wav_bytes = _wav_bytes_from_pcm(audio)
+    files = {
+        # server accepts keys: audio, file, or data — we use 'audio'
+        "audio": ("audio.wav", wav_bytes, "audio/wav"),
+    }
+    data = {"language": "ja"}
+    try:
+        r = _HTTP.post(url, files=files, data=data, timeout=REMOTE_ASR_TIMEOUT_MS/1000)
+        r.raise_for_status()
+        j = r.json()
+        # whisper server returns { transcript: "..." }
+        txt = (j.get("transcript") or j.get("text") or "").strip()
+        return txt
+    except Exception:
+        return None
+
+_local_model_cache = [None]
+
+def _ensure_local_model():
+    if _local_model_cache[0] is None:
+        _local_model_cache[0] = WhisperModel(
+            MODEL_SIZE,
+            device="cpu",
+            compute_type=COMPUTE_TYPE,
+            cpu_threads=CPU_THREADS,
+            num_workers=NUM_WORKERS,
+        )
+    return _local_model_cache[0]
+
 def transcribe_iter(chunks_iter, model):
     for audio in chunks_iter:
         audio = preprocess(audio)
-        if USE_OPENAI:
+        if ASR_BACKEND == "remote":
+            txt = _remote_transcribe(audio) or ""
+            if not txt:
+                # fallback to local
+                try:
+                    m = model if model is not None else _ensure_local_model()
+                    segs, _ = m.transcribe(
+                        audio,
+                        language="ja",
+                        beam_size=1,
+                        temperature=0.0,
+                        vad_filter=False,
+                        condition_on_previous_text=False,
+                        without_timestamps=True
+                    )
+                    txt = "".join(s.text for s in segs if good_seg(s)).strip()
+                except Exception:
+                    txt = ""
+            if txt:
+                yield txt
+            continue
+        if ASR_BACKEND == "openai":
             txt = _openai_transcribe(audio) or ""
+            if not txt:
+                # Fallback to local model to avoid dropping content
+                try:
+                    m = model if model is not None else _ensure_local_model()
+                    segs, _ = m.transcribe(
+                        audio,
+                        language="ja",
+                        beam_size=1,
+                        temperature=0.0,
+                        vad_filter=False,
+                        condition_on_previous_text=False,
+                        without_timestamps=True
+                    )
+                    txt = "".join(s.text for s in segs if good_seg(s)).strip()
+                except Exception:
+                    txt = ""
             if txt:
                 yield txt
             continue
@@ -242,6 +511,57 @@ def transcribe_iter(chunks_iter, model):
         txt = "".join(s.text for s in segs if good_seg(s)).strip()
         if txt:
             yield txt
+
+def transcribe_chunk(audio: np.ndarray, model) -> str:
+    audio = preprocess(audio)
+    if ASR_BACKEND == "remote":
+        txt = _remote_transcribe(audio) or ""
+        if txt:
+            return txt
+        # fallback to local
+        try:
+            m = model if model is not None else _ensure_local_model()
+            segs, _ = m.transcribe(
+                audio,
+                language="ja",
+                beam_size=1,
+                temperature=0.0,
+                vad_filter=False,
+                condition_on_previous_text=False,
+                without_timestamps=True
+            )
+            return ("".join(s.text for s in segs if good_seg(s)).strip())
+        except Exception:
+            return ""
+    if ASR_BACKEND == "openai":
+        txt = _openai_transcribe(audio) or ""
+        if txt:
+            return txt
+        try:
+            m = model if model is not None else _ensure_local_model()
+            segs, _ = m.transcribe(
+                audio,
+                language="ja",
+                beam_size=1,
+                temperature=0.0,
+                vad_filter=False,
+                condition_on_previous_text=False,
+                without_timestamps=True
+            )
+            return ("".join(s.text for s in segs if good_seg(s)).strip())
+        except Exception:
+            return ""
+    # local
+    segs, _ = model.transcribe(
+        audio,
+        language="ja",
+        beam_size=1 if CAPTURE_ALL else 5,
+        temperature=0.0,
+        vad_filter=False,
+        condition_on_previous_text=False,
+        without_timestamps=True
+    )
+    return ("".join(s.text for s in segs if good_seg(s)).strip())
 
 # =============== Caching (SQLite + LRU) ===============
 _CACHE_DB = "dict_cache.sqlite"
@@ -539,7 +859,7 @@ def _gpt_request(jp_text: str) -> Optional[Dict]:
         "You are a precise Japanese annotator and translator. "
         "Given a single Japanese utterance, return STRICT JSON with ONLY these keys: "
         "jp_html, en_html, vocabs, discourse, connectives, contextual_vocab, personal_vocab, tense_cheat, compliments, mood, mood_phrases, fallback, tips. "
-        "jp_html: Full Japanese preserving order/punctuation. Annotate key vocabulary inline as surface(reading); reading is kana only. Kanji words use hiragana; katakana loanwords keep katakana. Wrap each chosen vocab occurrence in <span data-id=\\\"vN\\\">…</span> so ids align with English and vocab list. "
+        "jp_html: MUST be the exact ASR utterance verbatim (no paraphrase, no normalization, no added or removed characters, no compression). Preserve all whitespace, punctuation, elongated characters. Do NOT add parentheses or readings in jp_html. You may only wrap spans: wrap each chosen vocab occurrence with <span data-id=\\\"vN\\\">…</span> so ids align with English and vocab list. "
         "en_html: Faithful, natural English translation covering the entire utterance. Wrap the English phrase corresponding to each vocab with the same <span data-id=\\\"vN\\\">…</span>. "
         "vocabs: Array of items actually present in input. Each: { id: 'v1', surface, reading_kana, meaning_en }. Prioritize nouns, verbs, adjectives, set phrases, counters; avoid particles/aux unless semantically important. "
         "discourse: 1–3 discourse markers appropriate to the context (e.g., ところで, ちなみに, それなら, それで, でも). "
@@ -551,13 +871,14 @@ def _gpt_request(jp_text: str) -> Optional[Dict]:
         "mood: optional short label of detected mood (e.g., encouraging/empathetic), and mood_phrases: 3 short options as [{ jp, reading_kana, en }]. "
         "fallback: a single concise, polite rescue phrase suited to the context: { jp, reading_kana, en }. "
         "tips: 1–2 concise reply suggestions in Japanese (optionally brief EN gloss). "
-        "Constraints: No invented content. Every vocabs[i].id must appear at least once as <span data-id=\\\"vN\\\"> in BOTH jp_html and en_html. Keep outputs concise; glosses 1–5 words. "
-        "If compress_elongations=true, shorten extreme ー/〜 runs and add an ellipsis; otherwise preserve as written. "
+        "Constraints: No invented content. Only annotate tokens containing Japanese script (Hiragana/Katakana/Kanji). If the utterance contains no Japanese characters, set vocabs=[], set en_html equal to jp_html (the same text), and leave other optional fields minimal. Every vocabs[i].id must appear at least once as <span data-id=\\\"vN\\\"> in BOTH jp_html and en_html. Keep outputs concise; glosses 1–5 words. "
+        "If compress_elongations=true, you may shorten extreme ー/〜 runs; otherwise preserve as written. In all cases, jp_html text content must remain identical to the ASR utterance (spans only). "
         "Select up to max_vocab items for jp/en spans. Respond with VALID JSON only—no Markdown, no extra text."
     )
     user = {
         "utterance": jp_text,
         "compress_elongations": bool(GPT_COMPRESS_ELONG),
+        "jp_verbatim": True,
         "max_vocab": int(GPT_MAX_VOCAB),
     }
     payload = {
@@ -570,7 +891,7 @@ def _gpt_request(jp_text: str) -> Optional[Dict]:
         ],
     }
     try:
-        r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
+        r = _HTTP.post(url, headers=headers, data=json.dumps(payload), timeout=60)
         r.raise_for_status()
         j = r.json()
         content = j["choices"][0]["message"]["content"].strip()
@@ -595,6 +916,14 @@ def _colorize_spans(html_text: str, color_map: Dict[str, str]) -> str:
             return f"{head[:-1]}; color:{color}{tail}"
         return f"{head} style=\"color:{color}\"{tail}"
     return re.sub(r"(<span\b[^>]*data-id=\"([^\"]+)\"[^>]*)(>)", repl, html_text)
+
+def _strip_span_tags(s: str) -> str:
+    # Remove span tags but keep inner text; also unescape entities for comparison
+    s_no_tags = re.sub(r"</?span\b[^>]*>", "", s)
+    try:
+        return html.unescape(s_no_tags)
+    except Exception:
+        return s_no_tags
 
 def _render_four_lines(j: Dict) -> List[str]:
     # build stable colors per id in vocabs order
@@ -719,8 +1048,79 @@ def _render_four_lines(j: Dict) -> List[str]:
     if tips:
         parts.append("💬 Replies: " + " / ".join(html.escape(t) for t in tips))
 
-    # Stack each section on its own line for readability
-    line4 = "<br>".join(p for p in parts if p)
+    if LINE4_TABLE_MODE:
+        # Build table columns with one item per row per column
+        col_markers = [html.escape(x) for x in (discourse + connectives)]
+        col_context = cv_parts[:]  # already escaped/assembled as s(reading) — meaning
+        col_personal = pv_parts[:]  # already escaped/assembled
+        col_tense = []
+        if any([tp, tpp]):
+            label = "Present polite"
+            left_r = f"({html.escape(tense.get('present_polite_reading') or '')})" if tense.get('present_polite_reading') else ""
+            right_r = f"({html.escape(tense.get('past_polite_reading') or '')})" if tense.get('past_polite_reading') else ""
+            col_tense.append(f"{label} — {html.escape(tp)}{left_r} / {html.escape(tpp)}{right_r}")
+        if any([tc, tcc]):
+            label = "Present casual"
+            left_r = f"({html.escape(tense.get('present_casual_reading') or '')})" if tense.get('present_casual_reading') else ""
+            right_r = f"({html.escape(tense.get('past_casual_reading') or '')})" if tense.get('past_casual_reading') else ""
+            col_tense.append(f"{label} — {html.escape(tc)}{left_r} / {html.escape(tcc)}{right_r}")
+        col_fallback = []
+        if fb_jp:
+            col_fallback.append(f"{html.escape(fb_jp)} ({html.escape(fb_rd)}) — {html.escape(fb_en)}")
+        comp_parts = []
+        for c in (j.get("compliments") or []):
+            jp = c.get("jp") or ""
+            rd = c.get("reading_kana") or ""
+            en = c.get("en") or ""
+            if jp:
+                comp_parts.append(f"{html.escape(jp)} ({html.escape(rd)}) — {html.escape(en)}")
+        col_mood = []
+        mlabel = (j.get("mood") or "").strip()
+        for c in (j.get("mood_phrases") or []):
+            jp = c.get("jp") or ""
+            rd = c.get("reading_kana") or ""
+            en = c.get("en") or ""
+            if jp:
+                prefix = (html.escape(mlabel) + ": ") if mlabel else ""
+                col_mood.append(prefix + f"{html.escape(jp)} ({html.escape(rd)}) — {html.escape(en)}")
+        col_replies = [html.escape(t) for t in (j.get("tips") or [])]
+
+        columns = [col_markers, col_context, col_personal, col_tense, col_fallback, col_mood, col_replies]
+        max_rows = max([len(c) for c in columns] + [1])
+        # Normalize column lengths
+        norm = []
+        for col in columns:
+            rows = col[:] + [""] * (max_rows - len(col))
+            norm.append(rows)
+        # Build HTML table
+        header = (
+            "<tr>"
+            "<th style=\"text-align:left;padding:4px 6px;\">🏷️ Markers</th>"
+            "<th style=\"text-align:left;padding:4px 6px;\">📚 Context Vocab</th>"
+            "<th style=\"text-align:left;padding:4px 6px;\">🧩 Personal</th>"
+            "<th style=\"text-align:left;padding:4px 6px;\">⏱ Tense</th>"
+            "<th style=\"text-align:left;padding:4px 6px;\">🛟 Fallback</th>"
+            "<th style=\"text-align:left;padding:4px 6px;\">🧭 Mood</th>"
+            "<th style=\"text-align:left;padding:4px 6px;\">💬 Replies</th>"
+            "</tr>"
+        )
+        body_rows = []
+        for i in range(max_rows):
+            cells = [norm[c][i] for c in range(len(norm))]
+            tds = "".join(
+                f"<td style=\"vertical-align:top;padding:4px 6px;\">{cell}</td>" for cell in cells
+            )
+            body_rows.append(f"<tr>{tds}</tr>")
+        table_html = (
+            "<table style=\"border-collapse:collapse;width:100%;\">"
+            f"<thead style=\"background:#f7f7f7;\">{header}</thead>"
+            f"<tbody>{''.join(body_rows)}</tbody>"
+            "</table>"
+        )
+        line4 = table_html
+    else:
+        # Stack each section on its own line for readability
+        line4 = "<br>".join(p for p in parts if p)
 
     return [jp_c, en_c, vocab_line, line4]
 
@@ -730,48 +1130,113 @@ def main():
     print(f"Listening on: {dev_name}")
     open(TRANSCRIPT_OUT, "w", encoding="utf-8").close()
     q = queue.Queue(maxsize=128)
-    threading.Thread(target=audio_thread, args=(dev_idx, q), daemon=True).start()
+    wave_q = queue.Queue(maxsize=16)
+    threading.Thread(target=audio_thread, args=(dev_idx, q, wave_q), daemon=True).start()
 
-    def frames():
-        while True:
-            yield q.get()
-
+    # Build local model if needed (used in ASR thread as fallback or primary when local)
     model = None
-    if not USE_OPENAI:
-        model = WhisperModel(
-            MODEL_SIZE,
-            device="cpu",
-            compute_type=COMPUTE_TYPE,
-            cpu_threads=CPU_THREADS,
-            num_workers=NUM_WORKERS,
-        )
+    if ASR_BACKEND in ("local", "remote", "openai") and not (ASR_BACKEND == "openai" and USE_OPENAI is False):
+        # Only construct if local is possible/used as fallback
+        try:
+            model = WhisperModel(
+                MODEL_SIZE,
+                device="cpu",
+                compute_type=COMPUTE_TYPE,
+                cpu_threads=CPU_THREADS,
+                num_workers=NUM_WORKERS,
+            )
+        except Exception:
+            model = None
 
-    def chunks():
+    # Queues between stages
+    chunk_q: queue.Queue = queue.Queue(maxsize=64)
+    text_q: queue.Queue = queue.Queue(maxsize=128)
+
+    # Stage 1: chunking + waveform flushing
+    threading.Thread(target=chunker_thread, args=(q, chunk_q, wave_q), daemon=True).start()
+
+    # Shared preview cache for dedup between ASR preview and formatted output
+    preview_cache = {"text": "", "t": 0.0}
+
+    # Stage 2: ASR uploader/decoder
+    def asr_worker():
         while True:
-            f = q.get()
-            yield f
-
-    for text in transcribe_iter(utterance_chunks(chunks()), model):
-        text = text.strip()
-        if not text:
-            continue
-        out_lines: List[str] = []
-        j = _gpt_request(text)
-        if j:
+            audio = chunk_q.get()
             try:
-                out_lines = _render_four_lines(j)
+                txt = transcribe_chunk(audio, model)
             except Exception:
-                out_lines = []
-        if not out_lines:
-            # Fallback minimal: inline annotation only, no GPT
-            annotated = annotate_text(text)
-            out_lines = [annotated, "", "", ""]
-        for i, line in enumerate(out_lines):
-            append_transcript(line)
-            print(line)
-        # blank line between utterances for readability
-        append_transcript("")
-        print("")
+                txt = ""
+            if txt:
+                # Immediate preview of verbatim JP without waiting for GPT
+                if PREVIEW_ASR_IMMEDIATE:
+                    ts = time.time()
+                    preview_cache["text"] = txt
+                    preview_cache["t"] = ts
+                    append_transcript(html.escape(txt))
+                    print(html.escape(txt))
+                text_q.put(txt)
+
+    # Start N ASR workers for concurrency so a slow request won't block new chunks
+    for _ in range(max(1, ASR_WORKERS)):
+        threading.Thread(target=asr_worker, daemon=True).start()
+
+    # Stage 3: Formatter/writer
+    def formatter_worker():
+        last_text = ""; last_t = 0.0
+        while True:
+            text = text_q.get().strip()
+            if not text:
+                continue
+            now = time.time()
+            if last_text and (now - last_t) <= 2.0:
+                if text == last_text or text.startswith(last_text) or last_text.startswith(text):
+                    continue
+            out_lines: List[str] = []
+            if not re.search(r"[ぁ-んァ-ヴ一-龯]", text):
+                out_lines = [html.escape(text), f"<span style=\"color:#888\">{html.escape(text)}</span>", "", ""]
+            else:
+                j = _gpt_request(text)
+                if j:
+                    try:
+                        jp_model = j.get("jp_html") or ""
+                        if JP_VERBATIM and jp_model:
+                            content = _strip_span_tags(jp_model)
+                            if content != text:
+                                j = dict(j)
+                                j["jp_html"] = html.escape(text)
+                        out_lines = _render_four_lines(j)
+                    except Exception:
+                        out_lines = []
+            if not out_lines:
+                if JP_VERBATIM:
+                    out_lines = [html.escape(text), "", "", ""]
+                else:
+                    annotated = annotate_text(text)
+                    out_lines = [annotated, "", "", ""]
+            # If we recently printed a preview identical to line 1, drop the first line to avoid duplicates
+            if out_lines and preview_cache["text"]:
+                try:
+                    if (time.time() - preview_cache["t"]) <= 10.0:
+                        if _strip_span_tags(out_lines[0]) == preview_cache["text"]:
+                            out_lines = out_lines[1:]
+                except Exception:
+                    pass
+            # Drop empty line4 if it has no content (just in case)
+            if len(out_lines) == 4 and (not out_lines[-1] or out_lines[-1].strip() == ""):
+                pass
+            for line in out_lines:
+                append_transcript(line)
+                print(line)
+            last_text = text; last_t = now
+            append_transcript("")
+            print("")
+
+    for _ in range(max(1, FORMAT_WORKERS)):
+        threading.Thread(target=formatter_worker, daemon=True).start()
+
+    # Keep main thread alive
+    while True:
+        time.sleep(1)
 
 if __name__ == "__main__":
     try:
