@@ -36,14 +36,15 @@
   let closeUnlisten: (() => void) | null = null
   let isClosing = false
   // Right sidebar (suggestions)
-  let detailsEnabled = false
+  let detailsEnabled = true
   let rightOpen = true
   const RIGHT_W_OPEN = 260
   const RIGHT_W_CLOSED = 26
-  type Suggest = { ja: string, read?: string, en?: string, ts?: number, ctx?: string }
-  let suggestions: Suggest[] = []
+  type Suggest = { ja: string, read?: string, en?: string }
   let suggTimeline: Array<Suggest & { count: number }> = []
+  const suggCounts: Record<string, number> = {}
   // Far right: ASR debug
+  let asrDebugEnabled = false
   let debugOpen = true
   const DEBUG_W_OPEN = 360
   const DEBUG_W_CLOSED = 26
@@ -132,8 +133,19 @@
           vocabs = extractVocabs(transcriptRaw)
           vocabsUniq = dedupeVocabs(vocabs)
           vocabsTimeline = accrueCounts(vocabs)
-          // Build right-side suggestions (exclude existing left vocabs)
-          suggestions = buildSuggestions(transcriptRaw, new Set(vocabsUniq.map(v => v.ja)))
+          // Build right-side suggestions (exclude existing left vocabs), enrich via API once per update
+          if (detailsEnabled) {
+            try {
+              const s = await client.suggestions()
+              const items = (s.items||[]).filter(x => !vocabsUniq.find(v => v.ja === x.ja))
+              for (const it of items) {
+                const prev = suggCounts[it.ja] || 0
+                const next = prev + 1
+                suggCounts[it.ja] = next
+                suggTimeline = [...suggTimeline, { ...it, count: next }]
+              }
+            } catch {}
+          }
           // Wait next frame then autoscroll if following tail
           requestAnimationFrame(maybeAutoscroll)
         }
@@ -142,30 +154,30 @@
     tPoll = setInterval(pollTranscript, 300)
     pollTranscript()
 
-    // Read health once for details toggle
-    try { const h = await client.health(); detailsEnabled = !!(h as any)?.show_details } catch {}
-    if (detailsEnabled) {
-      const pollSugg = async () => {
-        try {
-          const s = await client.suggestions();
-          const items = (s.items||[]).map(x => ({ ja: x.ja, read: x.read || '', en: x.en || '', ts: Number(x.ts)||0 }))
-          // Append only truly new timeline events using ts if present, else allow append all
-          const known = new Set(suggTimeline.map(it => it.ts||0))
-          const newOnes = items.filter(it => (it.ts||0) && !known.has(it.ts||0))
-          if (newOnes.length) {
-            for (const it of newOnes) {
-              // update count based on prior occurrences of same ja
-              const prev = suggTimeline.filter(x => x.ja === it.ja).length
-              suggTimeline = [...suggTimeline, { ...it, count: prev+1 }]
-            }
-          }
-        } catch {}
-      }
-      setInterval(pollSugg, 1000); pollSugg()
-    }
+    // Read health once (no gating; suggestions default on)
+    try { await client.health() } catch {}
 
-    // ASR debug poll
-    const pollAsr = async () => { try { const r = await client.asrDebugLog(); if ((r.items||[]).length) { asrRows = r.items as any } } catch {} }
+    // Suggestions poll (append-only timeline)
+    const pollSugg: any = async () => {
+      if (pollSugg._busy) return; pollSugg._busy = true
+      try {
+        const s = await client.suggestions();
+        const items = (s.items||[]).filter(x => !vocabsUniq.find(v => v.ja === x.ja))
+        if (items.length) {
+          for (const it of items) {
+            const prev = suggCounts[it.ja] || 0
+            const next = prev + 1
+            suggCounts[it.ja] = next
+            suggTimeline = [...suggTimeline, { ...it, count: next }]
+          }
+        }
+      } catch {}
+      finally { pollSugg._busy = false }
+    }
+    setInterval(pollSugg, 1000); pollSugg()
+
+    // ASR debug poll (gate by health flag)
+    const pollAsr: any = async () => { if (!asrDebugEnabled) return; if (pollAsr._busy) return; pollAsr._busy = true; try { const r = await client.asrDebugLog(); if ((r.items||[]).length) { asrRows = r.items as any } } catch {} finally { pollAsr._busy = false } }
     setInterval(pollAsr, 1000); pollAsr()
 
     // Poll waveform
@@ -425,7 +437,7 @@
         {#if rightOpen}▶{:else}◀{/if}
       </div>
       <div class="sidebar-content" style={`opacity:${rightOpen ? 1 : 0}; pointer-events:${rightOpen ? 'auto' : 'none'}; transition: opacity 120ms ease;`}>
-        <div class="vocabs-header"><div class="sidebar-title">Suggestions</div><div><small style="margin-right:8px;">{suggestions.length}</small></div></div>
+        <div class="vocabs-header"><div class="sidebar-title">Suggestions</div><div><small style="margin-right:8px;">{suggTimeline.length}</small></div></div>
         <div class="vocabs-list">
           {#each suggTimeline.filter(s => !vocabsUniq.find(v => v.ja === s.ja)) as s}
             <div class="vocab-item">
@@ -440,6 +452,7 @@
     </div>
   {/if}
 
+  {#if asrDebugEnabled}
   <div class="sidebar sidebar-debug" style={`width:${debugOpen ? DEBUG_W_OPEN : DEBUG_W_CLOSED}px`}>
     <div class="sidebar-toggle" title={debugOpen ? 'Collapse' : 'Expand'} on:click={() => debugOpen = !debugOpen}>
       {#if debugOpen}▶{:else}◀{/if}
@@ -469,6 +482,7 @@
       </div>
     </div>
   </div>
+  {/if}
 </div>
 
 {#if hoverVisible}

@@ -4,7 +4,7 @@
 #   みんな、小学校(しょうがっこう、elementary school)の時(とき、time)以来(いらい、since)だね。
 #   ⇒ It's been since elementary school days.
 
-import time, queue, threading, sys, re, os, functools, hashlib, json, sqlite3
+import time, queue, threading, sys, re, os, functools, hashlib, json, sqlite3, difflib, collections
 import numpy as np
 import sounddevice as sd
 import webrtcvad
@@ -84,6 +84,7 @@ GPT_MAX_CHARS = int(os.getenv("GPT_MAX_CHARS", "280"))
 GPT_RATE_LIMIT_MS = int(os.getenv("GPT_RATE_LIMIT_MS", "600"))
 GPT_CLEAN_REPEATS = os.getenv("GPT_CLEAN_REPEATS", "true").lower() in {"1","true","yes","y"}
 GPT_SKIP_ON_REPEAT = os.getenv("GPT_SKIP_ON_REPEAT", "true").lower() in {"1","true","yes","y"}
+GPT_REPEAT_SKIP_THRESHOLD = float(os.getenv("GPT_REPEAT_SKIP_THRESHOLD", "2.0"))
 LINE4_TABLE_MODE = os.getenv("LINE4_TABLE_MODE", "false").lower() in {"1","true","yes","y"}
 JP_VERBATIM = os.getenv("JP_VERBATIM", "true").lower() in {"1","true","yes","y"}
 CHUNK_OVERLAP_MS = int(os.getenv("CHUNK_OVERLAP_MS", "200"))
@@ -96,7 +97,7 @@ FORMAT_WORKERS = int(os.getenv("FORMAT_WORKERS", "4"))
 # Output line controls
 SHOW_VOCAB_LINE = os.getenv("SHOW_VOCAB_LINE", "false").lower() in {"1","true","yes","y"}
 SHOW_DETAILS_LINE = os.getenv("SHOW_DETAILS_LINE", "false").lower() in {"1","true","yes","y"}
-SHOW_ASR_DEBUG = os.getenv("SHOW_ASR_DEBUG", "true").lower() in {"1","true","yes","y"}
+SHOW_ASR_DEBUG = os.getenv("SHOW_ASR_DEBUG", "false").lower() in {"1","true","yes","y"}
 
 # Output
 TRANSCRIPT_OUT = "transcript.txt"
@@ -1241,7 +1242,7 @@ def _sanitize_for_gpt(s: str) -> Optional[str]:
         t = _collapse_repeated_phrases(t)
     if len(t) > GPT_MAX_CHARS:
         t = t[:GPT_MAX_CHARS]
-    if GPT_SKIP_ON_REPEAT and _repetition_score(s) >= 4.0:
+    if GPT_SKIP_ON_REPEAT and _repetition_score(s) >= GPT_REPEAT_SKIP_THRESHOLD:
         # too repetitive; skip GPT to avoid tokens
         return None
     return t
@@ -1278,13 +1279,42 @@ def main():
     threading.Thread(target=chunker_thread, args=(q, chunk_q, wave_q), daemon=True).start()
 
     # Stage 2: ASR uploader/decoder
+    # Drop duplicate audio blobs by rolling hash memory
+    seen_hashes = collections.deque(maxlen=64)
+    seen_hashes_set = set()
+    seen_hashes_lock = threading.Lock()
     def asr_worker():
         while True:
             audio = chunk_q.get()
+            # skip duplicate audio blobs (same bytes) recently seen
+            try:
+                h = hashlib.sha1(audio.tobytes()).hexdigest()
+                with seen_hashes_lock:
+                    if h in seen_hashes_set:
+                        continue
+                    # appending may evict leftmost when over maxlen
+                    if len(seen_hashes) == seen_hashes.maxlen:
+                        oldest = seen_hashes.popleft()
+                        try:
+                            seen_hashes_set.discard(oldest)
+                        except Exception:
+                            pass
+                    seen_hashes.append(h)
+                    seen_hashes_set.add(h)
+            except Exception:
+                pass
             try:
                 txt = transcribe_chunk(audio, model)
             except Exception:
                 txt = ""
+            # Guard tiny/noisy outputs (skip ultra-short unless explicitly capturing all)
+            try:
+                if not CAPTURE_ALL:
+                    tlen = len((txt or "").strip())
+                    if tlen < 3:
+                        txt = ""
+            except Exception:
+                pass
             # Debug compare: fire openai and remote on the same chunk (non-blocking)
             if SHOW_ASR_DEBUG:
                 try:
@@ -1320,14 +1350,46 @@ def main():
 
     def formatter_worker():
         last_text = ""; last_t = 0.0
+        last_window = collections.deque(maxlen=8)
+        last_window_ts = collections.deque(maxlen=8)
         while True:
             text = text_q.get().strip()
             if not text:
                 continue
             now = time.time()
+            # Skip near-duplicates in short time window
             if last_text and (now - last_t) <= 2.0:
                 if text == last_text or text.startswith(last_text) or last_text.startswith(text):
                     continue
+            # Deduplicate against recent outputs by similarity ratio
+            try:
+                # Normalize by collapsing repeated phrases to make similarity robust
+                def _norm(s: str) -> str:
+                    return _collapse_repeated_phrases(_collapse_long_runs(s), 2, 8, 1)
+                norm_text = _norm(text)
+                dup = False
+                for prev, pts in zip(list(last_window), list(last_window_ts)):
+                    if now - pts > 10.0:
+                        continue
+                    if prev == text or prev == norm_text:
+                        dup = True; break
+                    ratio = difflib.SequenceMatcher(a=prev, b=norm_text).ratio()
+                    if ratio >= 0.95:
+                        dup = True; break
+                if dup:
+                    continue
+            except Exception:
+                pass
+            # Extra guard: if normalization collapses majority of content, treat as noise
+            try:
+                norm_len = len(_collapse_repeated_phrases(_collapse_long_runs(text), 2, 8, 1))
+                if not CAPTURE_ALL and norm_len <= max(3, int(len(text)*0.4)):
+                    continue
+            except Exception:
+                pass
+            # Guard tiny/noisy outputs
+            if not CAPTURE_ALL and len(text) < 3:
+                continue
             out_lines: List[str] = []
             if not re.search(r"[ぁ-んァ-ヴ一-龯]", text):
                 # Non-Japanese: use GPT EN as line 2 by sending as-is; line 1 mirrors
@@ -1352,7 +1414,7 @@ def main():
                     except Exception:
                         out_lines = []
             else:
-                # Japanese present: always produce GPT output (block for rate limit)
+                # Japanese present: prefer GPT output; fallback to raw JP if skipped by repetition guard
                 payload_text = _sanitize_for_gpt(text)
                 if payload_text:
                     with gpt_lock:
@@ -1373,6 +1435,14 @@ def main():
                                     pass
                         except Exception:
                             out_lines = []
+                else:
+                    # Fallback minimal lines so UI is not blank
+                    try:
+                        jp_html = html.escape(text)
+                        en_html = ""
+                        out_lines = [jp_html, en_html]
+                    except Exception:
+                        out_lines = []
             if not out_lines:
                 # If GPT failed or returned nothing, skip this utterance entirely
                 continue
@@ -1383,6 +1453,11 @@ def main():
                 append_transcript(line)
                 print(line)
             last_text = text; last_t = now
+            try:
+                last_window.append(_collapse_repeated_phrases(_collapse_long_runs(text), 2, 8, 1))
+                last_window_ts.append(now)
+            except Exception:
+                pass
             append_transcript("")
             print("")
 
