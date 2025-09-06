@@ -8,3 +8,5 @@ pykakasi
 requests
 deep-translator
 numpy
+fastapi
+uvicorn[standard]

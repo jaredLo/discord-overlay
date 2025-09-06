@@ -21,3 +21,10 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# Node / Tauri
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+logs/
+tmp/

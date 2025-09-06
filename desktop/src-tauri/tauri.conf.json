@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.tauri.app/config/1",
+  "package": {
+    "productName": "DiscordOverlay",
+    "version": "0.1.0"
+  },
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devPath": "http://localhost:5173",
+    "distDir": "../dist"
+  },
+  "tauri": {
+    "allowlist": {
+      "all": false,
+      "http": {
+        "all": false,
+        "request": true,
+        "scope": [
+          "http://127.0.0.1:8201/*",
+          "http://localhost:8201/*",
+          "http://127.0.0.1/*",
+          "http://localhost/*"
+        ]
+      },
+      "clipboard": { "all": false, "writeText": true }
+    },
+    "windows": [
+      { "title": "Discord Overlay", "width": 800, "height": 560 }
+    ],
+    "security": { "csp": null },
+    "bundle": {
+      "active": true,
+      "targets": "all",
+      "icon": [],
+      "identifier": "com.example.discordoverlay"
+    }
+  }
+}

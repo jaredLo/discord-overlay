@@ -1,0 +1,13 @@
+:root { color-scheme: dark; }
+html, body, #app { height: 100%; margin: 0; overflow: hidden; }
+body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; background: #0b0f17; color: #e5e7eb; }
+button { cursor: pointer; }
+input, button, textarea { font-size: 14px; }
+
+.container { width: 100vw; height: 100vh; box-sizing: border-box; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
+.panel { background: transparent; border: 1px solid rgba(255,255,255,0.05); border-radius: 8px; padding: 8px; }
+.transcript { flex: 1 1 auto; overflow: auto; }
+.transcript .content { font-size: 16px; line-height: 1.45; white-space: normal; }
+.wave { height: 100px; }
+.scroll-arrow { position: absolute; right: 16px; bottom: 140px; background: rgba(15,23,42,0.8); border: 1px solid rgba(255,255,255,0.08); border-radius: 999px; padding: 6px 10px; cursor: pointer; user-select: none; }
+
