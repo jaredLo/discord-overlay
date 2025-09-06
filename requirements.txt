@@ -1,10 +1,10 @@
-numpy
+PySide6
+faster-whisper
 sounddevice
 webrtcvad
-faster-whisper
 fugashi
-unidic-lite
+unidic
 pykakasi
-PySide6
-deep-translator
 requests
+deep-translator
+numpy

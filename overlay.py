@@ -47,10 +47,21 @@ class Overlay(QWidget):
 
     def update_text(self) -> None:
         """Refresh overlay with annotated text."""
+        sb = self.text.verticalScrollBar()
+        # Detect if user is already at bottom (within a small threshold)
+        at_bottom_before = sb.value() >= sb.maximum() - 4
+        old_value = sb.value()
+
         lines = read_transcript().splitlines()
         self.text.setHtml("<br><br>".join(lines))
-        self.text.moveCursor(QTextCursor.End)
-        self.text.verticalScrollBar().setValue(self.text.verticalScrollBar().maximum())
+
+        # Only auto-scroll if user was at bottom before refresh
+        if at_bottom_before:
+            self.text.moveCursor(QTextCursor.End)
+            sb.setValue(sb.maximum())
+        else:
+            # Keep previous scroll position so user can read older lines
+            sb.setValue(min(sb.maximum(), old_value))
 
 
 def main() -> None:
