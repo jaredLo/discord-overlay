@@ -58,6 +58,6 @@ export class ApiClient {
     const r = await httpFetch(url, { method: 'GET' }).catch(async (e) => { await logClient(`Api.asrDebugLog error ${e?.message||e}`); throw e })
     await logClient(`Api.asrDebugLog status=${r.status} dur=${(nowMs()-t0).toFixed(0)}ms`)
     if (r.status >= 400) throw new Error(`ASR debug failed ${r.status}`)
-    return r.data as { items: Array<{ id: string, ts: number, openai?: { text?: string, ms?: number }, remote?: { text?: string, ms?: number }, local?: { text?: string, ms?: number } }> }
+    return r.data as { items: Array<{ id: string, ts: number, openai?: { text?: string, ms?: number }, remote?: { text?: string, ms?: number } }> }
   }
 }

@@ -48,7 +48,7 @@
   let debugOpen = true
   const DEBUG_W_OPEN = 360
   const DEBUG_W_CLOSED = 26
-  type AsrRow = { id: string, ts: number, openai?: { text?: string, ms?: number }, remote?: { text?: string, ms?: number }, local?: { text?: string, ms?: number } }
+  type AsrRow = { id: string, ts: number, openai?: { text?: string, ms?: number }, remote?: { text?: string, ms?: number } }
   let asrRows: AsrRow[] = []
 
 
@@ -471,11 +471,6 @@
               <div class="asr-title">Home</div>
               <div class="asr-card">{r.remote?.text || ''}</div>
               <div class="asr-meta">{r.remote?.ms ? `${r.remote.ms} ms` : ''}</div>
-            </div>
-            <div class="asr-col">
-              <div class="asr-title">Local</div>
-              <div class="asr-card">{r.local?.text || ''}</div>
-              <div class="asr-meta">{r.local?.ms ? `${r.local.ms} ms` : ''}</div>
             </div>
           </div>
         {/each}

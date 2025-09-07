@@ -8,7 +8,7 @@ import time, queue, threading, sys, re, os, functools, hashlib, json, sqlite3, d
 import numpy as np
 import sounddevice as sd
 import webrtcvad
-from faster_whisper import WhisperModel
+# Local model disabled: no WhisperModel import
 from pykakasi import kakasi
 from fugashi import Tagger
 from typing import Union, Optional, Dict, Tuple, List
@@ -428,144 +428,34 @@ def _remote_transcribe(audio: np.ndarray) -> Optional[str]:
     except Exception:
         return None
 
-_local_model_cache = [None]
-
-def _ensure_local_model():
-    if _local_model_cache[0] is None:
-        _local_model_cache[0] = WhisperModel(
-            MODEL_SIZE,
-            device="cpu",
-            compute_type=COMPUTE_TYPE,
-            cpu_threads=CPU_THREADS,
-            num_workers=NUM_WORKERS,
-        )
-    return _local_model_cache[0]
-
-def _local_transcribe_text(audio: np.ndarray, model=None) -> str:
-    try:
-        m = model if model is not None else _ensure_local_model()
-        segs, _ = m.transcribe(
-            audio,
-            language="ja",
-            beam_size=1 if CAPTURE_ALL else 5,
-            temperature=0.0,
-            vad_filter=False,
-            condition_on_previous_text=False,
-            without_timestamps=True
-        )
-        return ("".join(s.text for s in segs if good_seg(s)).strip())
-    except Exception:
-        return ""
+# Local model path removed — no CPU transcription here.
 
 def transcribe_iter(chunks_iter, model):
     for audio in chunks_iter:
         audio = preprocess(audio)
         if ASR_BACKEND == "remote":
             txt = _remote_transcribe(audio) or ""
-            if not txt:
-                # fallback to local
-                try:
-                    m = model if model is not None else _ensure_local_model()
-                    segs, _ = m.transcribe(
-                        audio,
-                        language="ja",
-                        beam_size=1,
-                        temperature=0.0,
-                        vad_filter=False,
-                        condition_on_previous_text=False,
-                        without_timestamps=True
-                    )
-                    txt = "".join(s.text for s in segs if good_seg(s)).strip()
-                except Exception:
-                    txt = ""
             if txt:
                 yield txt
             continue
         if ASR_BACKEND == "openai":
             txt = _openai_transcribe(audio) or ""
-            if not txt:
-                # Fallback to local model to avoid dropping content
-                try:
-                    m = model if model is not None else _ensure_local_model()
-                    segs, _ = m.transcribe(
-                        audio,
-                        language="ja",
-                        beam_size=1,
-                        temperature=0.0,
-                        vad_filter=False,
-                        condition_on_previous_text=False,
-                        without_timestamps=True
-                    )
-                    txt = "".join(s.text for s in segs if good_seg(s)).strip()
-                except Exception:
-                    txt = ""
             if txt:
                 yield txt
             continue
-        # local faster-whisper
-        segs, _ = model.transcribe(
-            audio,
-            language="ja",
-            beam_size=1 if CAPTURE_ALL else 5,
-            temperature=0.0,
-            vad_filter=False,
-            condition_on_previous_text=False,
-            without_timestamps=True
-        )
-        txt = "".join(s.text for s in segs if good_seg(s)).strip()
-        if txt:
-            yield txt
+        # local backend disabled
+        continue
 
 def transcribe_chunk(audio: np.ndarray, model) -> str:
     audio = preprocess(audio)
     if ASR_BACKEND == "remote":
         txt = _remote_transcribe(audio) or ""
-        if txt:
-            return txt
-        # fallback to local
-        try:
-            m = model if model is not None else _ensure_local_model()
-            segs, _ = m.transcribe(
-                audio,
-                language="ja",
-                beam_size=1,
-                temperature=0.0,
-                vad_filter=False,
-                condition_on_previous_text=False,
-                without_timestamps=True
-            )
-            return ("".join(s.text for s in segs if good_seg(s)).strip())
-        except Exception:
-            return ""
+        return txt
     if ASR_BACKEND == "openai":
         txt = _openai_transcribe(audio) or ""
-        if txt:
-            return txt
-        try:
-            m = model if model is not None else _ensure_local_model()
-            segs, _ = m.transcribe(
-                audio,
-                language="ja",
-                beam_size=1,
-                temperature=0.0,
-                vad_filter=False,
-                condition_on_previous_text=False,
-                without_timestamps=True
-            )
-            return ("".join(s.text for s in segs if good_seg(s)).strip())
-        except Exception:
-            return ""
-    # local
-    segs, _ = model.transcribe(
-        audio,
-        language="ja",
-        beam_size=1 if CAPTURE_ALL else 5,
-        temperature=0.0,
-        vad_filter=False,
-        condition_on_previous_text=False,
-        without_timestamps=True
-    )
-    return ("".join(s.text for s in segs if good_seg(s)).strip())
+        return txt
+    # local backend disabled
+    return ""
 
 # =============== Caching (SQLite + LRU) ===============
 _CACHE_DB = "dict_cache.sqlite"
@@ -1272,19 +1162,7 @@ def main():
     threading.Thread(target=audio_thread, args=(dev_idx, q, wave_q), daemon=True).start()
 
     # Build local model if needed (used in ASR thread as fallback or primary when local)
-    model = None
-    if ASR_BACKEND in ("local", "remote", "openai") and not (ASR_BACKEND == "openai" and USE_OPENAI is False):
-        # Only construct if local is possible/used as fallback
-        try:
-            model = WhisperModel(
-                MODEL_SIZE,
-                device="cpu",
-                compute_type=COMPUTE_TYPE,
-                cpu_threads=CPU_THREADS,
-                num_workers=NUM_WORKERS,
-            )
-        except Exception:
-            model = None
+    model = None  # local model disabled
 
     # Queues between stages
     chunk_q: queue.Queue = queue.Queue(maxsize=64)
@@ -1343,13 +1221,9 @@ def main():
                             return
                         t0 = time.time(); r = _remote_transcribe(a) or ""; ms = int((time.time()-t0)*1000)
                         _asr_debug_update(item_id, "remote", r, ms)
-                    def run_local(a):
-                        t0 = time.time(); r = _local_transcribe_text(a, model) or ""; ms = int((time.time()-t0)*1000)
-                        _asr_debug_update(item_id, "local", r, ms)
                     item_id = f"{int(time.time()*1000)}-{hashlib.md5(audio.tobytes()).hexdigest()[:6]}"
                     threading.Thread(target=run_openai, args=(audio.copy(),), daemon=True).start()
                     threading.Thread(target=run_remote, args=(audio.copy(),), daemon=True).start()
-                    threading.Thread(target=run_local, args=(audio.copy(),), daemon=True).start()
                 except Exception:
                     pass
             if txt:

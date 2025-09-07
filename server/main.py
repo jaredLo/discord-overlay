@@ -337,7 +337,6 @@ def get_asr_debug():
                     "ts": it.get("ts"),
                     "openai": it.get("openai") or {},
                     "remote": it.get("remote") or {},
-                    "local": it.get("local") or {},
                 })
             return JSONResponse({"items": out})
     except Exception:
