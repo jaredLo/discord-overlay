@@ -13,6 +13,7 @@ from pykakasi import kakasi
 from fugashi import Tagger
 from typing import Union, Optional, Dict, Tuple, List
 import requests
+from pathlib import Path
 from io import BytesIO
 import wave
 import html
@@ -109,6 +110,24 @@ USER_DICT_CSV = "user_dict.csv"   # optional overrides: surface,reading,english
 
 # Networking politeness
 JISHO_MIN_INTERVAL_S = 0.6        # >= 0.6s between remote requests
+JISHO_REMOTE_ENABLED = os.getenv("JISHO_REMOTE_ENABLED", "false").lower() in {"1","true","yes","y"}
+PERF_LOGGING = os.getenv("PERF_LOGGING", "true").lower() in {"1","true","yes","y"}
+PERF_LOG_FILE = os.getenv("PERF_LOG_FILE", str(Path("logs") / "perf.log"))
+
+def _perf(msg: str):
+    try:
+        if PERF_LOGGING:
+            line = f"[PERF] {msg}"
+            print(line)
+            try:
+                p = Path(PERF_LOG_FILE)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                with open(p, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 # =============== UniDic tagger (full if installed) ===============
 def make_tagger():
@@ -526,7 +545,13 @@ def jisho_lookup(word: str):
         conn.close()
         try: return json.loads(row[0])
         except: return None
+    # Skip remote lookup entirely if disabled for low-latency path
+    if not JISHO_REMOTE_ENABLED:
+        conn.close(); return None
+    t0 = time.time()
     data = _jisho_lookup_mem(word)
+    dt = int((time.time() - t0) * 1000)
+    _perf(f"jisho '{word}' {dt}ms {'HIT' if data else 'MISS'}")
     if data is not None:
         conn.execute("INSERT OR REPLACE INTO jisho (k,v,ts) VALUES (?,?,?)",
                      (word, json.dumps(data, ensure_ascii=False), time.time()))
@@ -859,10 +884,13 @@ def _gpt_request(jp_text: str) -> Optional[Dict]:
         ],
     }
     try:
+        t0 = time.time()
         r = _HTTP.post(url, headers=headers, data=json.dumps(payload), timeout=60)
         r.raise_for_status()
         j = r.json()
         content = j["choices"][0]["message"]["content"].strip()
+        dt = int((time.time() - t0) * 1000)
+        _perf(f"gpt {OPENAI_MODEL} {dt}ms len={len(jp_text)}")
         return json.loads(content)
     except Exception:
         return None
@@ -895,6 +923,7 @@ def _strip_span_tags(s: str) -> str:
 
 def _build_vocab_line_from_jp(jp_html_text: str) -> str:
     try:
+        t0 = time.time()
         # Strip HTML tags, tokenize, and build surf(reading、gloss) items
         clean = re.sub(r"<[^>]+>", "", jp_html_text)
         toks = []
@@ -904,6 +933,7 @@ def _build_vocab_line_from_jp(jp_html_text: str) -> str:
             toks = []
         items = []
         seen = set()
+        found_gloss = 0
         for m in toks:
             surf = m.surface
             pos1 = getattr(m.feature, 'pos1', '')
@@ -918,12 +948,16 @@ def _build_vocab_line_from_jp(jp_html_text: str) -> str:
             rd = to_hira(rd)
             gloss = best_gloss(surf) or ''
             if gloss:
+                found_gloss += 1
                 items.append(f"{html.escape(surf)}({html.escape(rd)}) — {html.escape(gloss)}")
             else:
                 items.append(f"{html.escape(surf)}({html.escape(rd)})")
             if len(items) >= GPT_MAX_VOCAB:
                 break
-        return "Vocab: " + (" ・ ".join(items) if items else "(none)")
+        out = "Vocab: " + (" ・ ".join(items) if items else "(none)")
+        dt = int((time.time() - t0) * 1000)
+        _perf(f"vocab_line items={len(items)} glossed={found_gloss} {dt}ms")
+        return out
     except Exception:
         return "Vocab: (none)"
 
@@ -1227,7 +1261,10 @@ def main():
                 except Exception:
                     pass
             if txt:
-                text_q.put(txt)
+                try:
+                    text_q.put({"text": txt, "t_asr": time.time()})
+                except Exception:
+                    text_q.put(txt)
 
     # Start N ASR workers for concurrency so a slow request won't block new chunks
     for _ in range(max(1, ASR_WORKERS)):
@@ -1242,10 +1279,30 @@ def main():
         last_window = collections.deque(maxlen=8)
         last_window_ts = collections.deque(maxlen=8)
         while True:
-            text = text_q.get().strip()
+            item = text_q.get()
+            t_asr = None
+            try:
+                if isinstance(item, dict):
+                    text = str(item.get("text", "")).strip()
+                    try:
+                        t_asr_val = item.get("t_asr")
+                        if t_asr_val is not None:
+                            t_asr = float(t_asr_val)
+                    except Exception:
+                        t_asr = None
+                else:
+                    text = str(item).strip()
+            except Exception:
+                text = str(item).strip()
             if not text:
                 continue
             now = time.time()
+            if t_asr:
+                try:
+                    qms = int((now - t_asr) * 1000)
+                    _perf(f"queue_wait {qms}ms len={len(text)}")
+                except Exception:
+                    pass
             # Skip near-duplicates in short time window
             if last_text and (now - last_t) <= 2.0:
                 if text == last_text or text.startswith(last_text) or last_text.startswith(text):
@@ -1289,6 +1346,7 @@ def main():
                     elapsed_ms = (now2 - GPT_LAST_TS["t"]) * 1000.0
                     wait_ms = GPT_RATE_LIMIT_MS - elapsed_ms
                     if wait_ms > 0:
+                        _perf(f"gpt wait {int(wait_ms)}ms (rate limit)")
                         time.sleep(wait_ms/1000.0)
                     GPT_LAST_TS["t"] = time.time()
                 j = _gpt_request(payload_text)
@@ -1311,15 +1369,20 @@ def main():
                         elapsed_ms = (now2 - GPT_LAST_TS["t"]) * 1000.0
                         wait_ms = GPT_RATE_LIMIT_MS - elapsed_ms
                         if wait_ms > 0:
+                            _perf(f"gpt wait {int(wait_ms)}ms (rate limit)")
                             time.sleep(wait_ms/1000.0)
                         GPT_LAST_TS["t"] = time.time()
                     j = _gpt_request(payload_text)
                     if j:
                         try:
+                            t0 = time.time()
                             out_lines = _render_four_lines(j)
+                            _perf(f"render_four_lines {int((time.time()-t0)*1000)}ms")
                             if SHOW_DETAILS_LINE:
                                 try:
+                                    t1 = time.time()
                                     update_suggestions(j.get("suggestions") or [])
+                                    _perf(f"update_suggestions {int((time.time()-t1)*1000)}ms")
                                 except Exception:
                                     pass
                         except Exception:
@@ -1327,10 +1390,12 @@ def main():
                 else:
                     # Fallback minimal lines so UI is not blank, include local vocab line
                     try:
+                        t2 = time.time()
                         jp_html = html.escape(text)
                         en_html = ""
                         vocab_line = _build_vocab_line_from_jp(jp_html)
                         out_lines = [jp_html, en_html, vocab_line]
+                        _perf(f"fallback_local_vocab {int((time.time()-t2)*1000)}ms")
                     except Exception:
                         out_lines = []
             if not out_lines:
@@ -1350,6 +1415,12 @@ def main():
                 pass
             append_transcript("")
             print("")
+            if t_asr:
+                try:
+                    total_ms = int((time.time() - t_asr) * 1000)
+                    _perf(f"utterance_total {total_ms}ms len={len(text)}")
+                except Exception:
+                    pass
 
     for _ in range(max(1, FORMAT_WORKERS)):
         threading.Thread(target=formatter_worker, daemon=True).start()

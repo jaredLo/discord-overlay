@@ -28,3 +28,4 @@ desktop/dist/
 desktop/src-tauri/target/
 logs/
 tmp/
+uploads/

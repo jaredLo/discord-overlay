@@ -40,9 +40,19 @@
   let rightOpen = true
   const RIGHT_W_OPEN = 260
   const RIGHT_W_CLOSED = 26
-  type Suggest = { ja: string, read?: string, en?: string }
+  type Suggest = { ja: string, read?: string, en?: string, ctx?: string }
   let suggTimeline: Array<Suggest & { count: number }> = []
   const suggCounts: Record<string, number> = {}
+  // Far right: Raw transcription (append-only chat-style)
+  let rawEnabled = true
+  let rawOpen = true
+  const RAW_W_OPEN = 260
+  const RAW_W_CLOSED = 26
+  type RawItem = { id: string, text: string }
+  let rawTimeline: RawItem[] = []
+  const rawSeenIds: Record<string, boolean> = {}
+  const jpCharRe = /[\u30A0-\u30FF\u3040-\u309F\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF々〆ヵヶ]/
+  function isJapanese(s: string): boolean { try { return jpCharRe.test(s) } catch { return false } }
   // Far right: ASR debug
   let asrDebugEnabled = false
   let debugOpen = true
@@ -133,6 +143,7 @@
           vocabs = extractVocabs(transcriptRaw)
           vocabsUniq = dedupeVocabs(vocabs)
           vocabsTimeline = accrueCounts(vocabs)
+          // Raw transcription now sourced from ASR debug endpoint (handled in poll below)
           // Build right-side suggestions (exclude existing left vocabs), enrich via API once per update
           if (detailsEnabled) {
             try {
@@ -176,8 +187,27 @@
     }
     setInterval(pollSugg, 1000); pollSugg()
 
-    // ASR debug poll (gate by health flag)
-    const pollAsr: any = async () => { if (!asrDebugEnabled) return; if (pollAsr._busy) return; pollAsr._busy = true; try { const r = await client.asrDebugLog(); if ((r.items||[]).length) { asrRows = r.items as any } } catch {} finally { pollAsr._busy = false } }
+    // ASR debug poll (always used to feed Raw transcription; UI debug panel gated separately)
+    const pollAsr: any = async () => {
+      if (pollAsr._busy) return; pollAsr._busy = true
+      try {
+        const r = await client.asrDebugLog()
+        const items = (r.items || []) as any as AsrRow[]
+        if (items.length) {
+          asrRows = items
+          // Update Raw transcription from newest ASR entries
+          for (const it of items) {
+            const key = String(it.id || it.ts)
+            if (!key || rawSeenIds[key]) continue
+            const text = String((it.remote?.text || it.openai?.text || '') || '').trim()
+            if (!text || !isJapanese(text)) { rawSeenIds[key] = true; continue }
+            rawSeenIds[key] = true
+            rawTimeline = [...rawTimeline, { id: key, text }].slice(-300)
+          }
+        }
+      } catch {}
+      finally { pollAsr._busy = false }
+    }
     setInterval(pollAsr, 1000); pollAsr()
 
     // Poll waveform
@@ -205,6 +235,7 @@
         clearInterval(tPoll)
         clearInterval(wPoll)
         await exportCsvPeriodic()
+        await exportRawTranscriptOnClose()
       } catch (_) {
         // ignore
       } finally {
@@ -348,6 +379,25 @@
     }
   }
 
+  function rawTranscriptText(): string {
+    try { return rawTimeline.map(r => r.text).join('\n') } catch { return '' }
+  }
+
+  async function exportRawTranscriptOnClose() {
+    try {
+      const text = rawTranscriptText()
+      if (text && text.trim()) {
+        const d = new Date()
+        const pad = (n: number, w=2) => String(n).padStart(w, '0')
+        const ms = pad(d.getMilliseconds(), 3)
+        const name = `raw_transcript-${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}-${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}-${ms}.txt`
+        await invoke<string>('export_raw_transcript', { text, fileName: name })
+      }
+    } catch (e) {
+      console.error('Export raw transcript failed', e)
+    }
+  }
+
   // Hover handlers (avoid TS casts in template)
   function onVocabEnter(e: MouseEvent, v: Vocab) {
     if (!v.ctx) return
@@ -446,6 +496,22 @@
               {#if s.en}<span class="vocab-en">{s.en}</span>{/if}
               {#if s.count>1}<span class="vocab-count">×{s.count}</span>{/if}
             </div>
+          {/each}
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if rawEnabled}
+    <div class="sidebar sidebar-right" style={`width:${rawOpen ? RAW_W_OPEN : RAW_W_CLOSED}px`}>
+      <div class="sidebar-toggle" title={rawOpen ? 'Collapse' : 'Expand'} on:click={() => rawOpen = !rawOpen}>
+        {#if rawOpen}▶{:else}◀{/if}
+      </div>
+      <div class="sidebar-content" style={`opacity:${rawOpen ? 1 : 0}; pointer-events:${rawOpen ? 'auto' : 'none'}; transition: opacity 120ms ease;`}>
+        <div class="vocabs-header"><div class="sidebar-title">Raw transcription</div><div><small style="margin-right:8px;">{rawTimeline.length}</small></div></div>
+        <div class="vocabs-list">
+          {#each rawTimeline as r}
+            <div class="vocab-item">{r.text}</div>
           {/each}
         </div>
       </div>

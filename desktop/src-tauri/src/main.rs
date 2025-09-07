@@ -57,13 +57,32 @@ fn export_vocabs(csv: String, file_name: Option<String>) -> Result<String, Strin
   }
 }
 
+#[tauri::command]
+fn export_raw_transcript(text: String, file_name: Option<String>) -> Result<String, String> {
+  // Save plain text raw transcript to logs directory
+  let mut dir = log_file_path();
+  if dir.pop() { /* now at logs/ */ } else { return Err("failed to resolve logs dir".into()); }
+  if let Err(e) = std::fs::create_dir_all(&dir) { return Err(format!("create logs dir failed: {}", e)); }
+  let file = match file_name {
+    Some(name) if !name.trim().is_empty() => dir.join(name),
+    _ => {
+      let ts = ts_ms();
+      dir.join(format!("raw_transcript-{}.txt", ts))
+    }
+  };
+  match std::fs::write(&file, text.as_bytes()) {
+    Ok(_) => Ok(file.display().to_string()),
+    Err(e) => Err(format!("write failed: {}", e)),
+  }
+}
+
 fn main() {
   let enabled = std::env::var("TAURI_CLIENT_LOG").ok().map(|v| v.to_lowercase());
   if let Some(v) = enabled { if v=="0"||v=="false"||v=="off" { LOG_ENABLED.store(false, Ordering::Relaxed); } }
   log_line("tauri main: builder start");
   let t_build = Instant::now();
   tauri::Builder::default()
-    .invoke_handler(tauri::generate_handler![client_log, export_vocabs])
+    .invoke_handler(tauri::generate_handler![client_log, export_vocabs, export_raw_transcript])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
   log_duration("tauri main: builder+run", t_build);
