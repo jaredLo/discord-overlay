@@ -181,25 +181,6 @@
     // Read health once (no gating; suggestions default on)
     try { const h = await client.health(); asrBackend = (h?.asr_backend || '').toLowerCase() } catch {}
 
-    // Suggestions poll (append-only timeline)
-    const pollSugg: any = async () => {
-      if (pollSugg._busy) return; pollSugg._busy = true
-      try {
-        const s = await client.suggestions();
-        const items = (s.items||[]).filter(x => !vocabsUniq.find(v => v.ja === x.ja))
-        if (items.length) {
-          for (const it of items) {
-            const prev = suggCounts[it.ja] || 0
-            const next = prev + 1
-            suggCounts[it.ja] = next
-            suggTimeline = [...suggTimeline, { ...it, count: next }]
-          }
-        }
-      } catch {}
-      finally { pollSugg._busy = false }
-    }
-    setInterval(pollSugg, 1000); pollSugg()
-
     // ASR debug poll (always used to feed Raw transcription; UI debug panel gated separately)
     const pollAsr: any = async () => {
       if (pollAsr._busy) return; pollAsr._busy = true
