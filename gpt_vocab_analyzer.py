@@ -15,6 +15,15 @@ from pathlib import Path
 import sqlite3
 import hashlib
 
+try:
+    from fugashi import Tagger as _FallbackTagger
+    from pykakasi import kakasi as _kakasi
+    _fb_tagger = _FallbackTagger()
+    _fb_kks = _kakasi(); _fb_kks.setMode("J","H"); _fb_conv = _fb_kks.getConverter()
+except Exception:
+    _fb_tagger = None
+    _fb_conv = None
+
 # Load environment variables (similar to listener.py)
 def _load_env_file(path: str = ".env"):
     try:
@@ -110,6 +119,35 @@ def _cache_analysis(text: str, response: Dict):
     except Exception:
         pass
 
+def _to_hira_fb(s: str) -> str:
+    if _fb_conv is None:
+        return s
+    try:
+        return "".join(p["hira"] for p in _fb_conv.convert(s))
+    except Exception:
+        return s
+
+def _fallback_basic_vocab(text: str) -> Dict[str, List[Dict]]:
+    """Simple fallback analysis using fugashi if ChatGPT is unavailable or returns empty."""
+    if _fb_tagger is None:
+        return {"vocabulary": [], "kanji_only": [], "katakana_words": []}
+    entries: List[Dict] = []
+    try:
+        for token in _fb_tagger(text):
+            pos = getattr(token.feature, "pos1", "")
+            if pos not in ("名詞", "動詞", "形容詞"):
+                continue
+            reading = getattr(token.feature, "pron", None) or getattr(token.feature, "kana", None) or ""
+            entries.append({
+                "surface": token.surface,
+                "reading_hiragana": _to_hira_fb(reading),
+                "meaning_en": "",
+                "word_type": pos,
+            })
+    except Exception:
+        return {"vocabulary": [], "kanji_only": [], "katakana_words": []}
+    return {"vocabulary": entries, "kanji_only": [], "katakana_words": []}
+
 # Rate limiting
 _last_request_time = {"t": 0.0}
 _rate_limit_lock = threading.Lock()
@@ -171,7 +209,7 @@ Return STRICT JSON only with this structure:
   ]
 }
 
-Extract only meaningful vocabulary (nouns, verbs, adjectives). Skip particles, conjunctions, and common words. Focus on words learners would want to study."""
+Identify nouns, verbs, adjectives, and notable expressions. Include both common and advanced terms and do not omit polite or infrequent words. Exclude particles and conjunctions."""
 
     user_content = f"Analyze this Japanese text for vocabulary:\n\n{japanese_text}"
     
@@ -264,40 +302,55 @@ class VocabularyAnalyzer:
 
         return results
 
-def extract_japanese_from_transcript(transcript_text: str) -> List[str]:
+def extract_japanese_from_transcript(transcript_text: str, max_segment_chars: int = 200) -> List[str]:
     """
     Extract Japanese sentences/segments from transcript text.
-    Filters out vocab lines and English translations.
+    Filters out vocab lines and English translations and splits long text into
+    smaller chunks so more vocabulary can be captured.
     """
     if not transcript_text:
         return []
-    
+
     lines = transcript_text.strip().split('\n')
-    japanese_segments = []
-    
+    japanese_segments: List[str] = []
+
     # Japanese character pattern
     jp_pattern = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF々〆ヵヶ]')
-    
+
     for line in lines:
         line = line.strip()
         if not line:
             continue
-        
+
         # Skip vocab lines
         if line.startswith('Vocab:') or '📚' in line:
             continue
-        
+
         # Skip lines that look like English translations (start with lowercase or common EN words)
         if re.match(r'^[a-z]', line) or line.startswith(('The ', 'A ', 'An ', 'I ', 'You ', 'He ', 'She ', 'It ', 'We ', 'They ')):
             continue
-        
+
         # Remove HTML tags
         clean_line = re.sub(r'<[^>]+>', '', line)
-        
+
         # Check if line contains Japanese characters
-        if jp_pattern.search(clean_line):
-            japanese_segments.append(clean_line.strip())
-    
+        if not jp_pattern.search(clean_line):
+            continue
+
+        # Split into sentences and chunk by max_segment_chars
+        sentences = re.split(r'(?<=[。！？!?])', clean_line)
+        buf = ""
+        for sent in sentences:
+            sent = sent.strip()
+            if not sent:
+                continue
+            buf += sent
+            if len(buf) >= max_segment_chars or buf.endswith(('。', '！', '!', '？', '?')):
+                japanese_segments.append(buf.strip())
+                buf = ""
+        if buf:
+            japanese_segments.append(buf.strip())
+
     return japanese_segments
 
 # Initialize global analyzer instance
@@ -352,7 +405,9 @@ def analyze_transcript_vocab(transcript_text: str) -> Dict[str, List[Dict]]:
         result = _get_cached_analysis(seg)
         if result is None:
             result = analyzer.analyze_text(seg)
-        if not result:
+        if not result or not result.get("vocabulary"):
+            result = _fallback_basic_vocab(seg)
+        if not result or not result.get("vocabulary"):
             continue
 
         # Aggregate vocabulary entries and counts
