@@ -8,7 +8,7 @@ import os
 import time
 import json
 import threading
-from typing import List, Dict, Optional, Tuple, Any, Set
+from typing import List, Dict, Optional, Tuple, Any, Set, Iterator
 import re
 import requests
 from pathlib import Path
@@ -263,41 +263,45 @@ class VocabularyAnalyzer:
         
         return results
 
-def extract_japanese_from_transcript(transcript_text: str) -> List[str]:
-    """
-    Extract Japanese sentences/segments from transcript text.
-    Filters out vocab lines and English translations.
+def extract_japanese_from_transcript(
+    transcript_text: str, line_offset: int = 0
+) -> Iterator[Tuple[int, str]]:
+    """Extract Japanese sentences/segments from transcript text.
+
+    Args:
+        transcript_text: Full transcript text to parse
+        line_offset: Starting line index offset (for windowed text)
+
+    Yields:
+        Tuples of ``(line_index, text)`` for each Japanese line found
     """
     if not transcript_text:
-        return []
-    
+        return
+
     lines = transcript_text.strip().split('\n')
-    japanese_segments = []
-    
+
     # Japanese character pattern
     jp_pattern = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF々〆ヵヶ]')
-    
-    for line in lines:
+
+    for idx, line in enumerate(lines):
         line = line.strip()
         if not line:
             continue
-        
+
         # Skip vocab lines
         if line.startswith('Vocab:') or '📚' in line:
             continue
-        
+
         # Skip lines that look like English translations (start with lowercase or common EN words)
         if re.match(r'^[a-z]', line) or line.startswith(('The ', 'A ', 'An ', 'I ', 'You ', 'He ', 'She ', 'It ', 'We ', 'They ')):
             continue
-        
+
         # Remove HTML tags
         clean_line = re.sub(r'<[^>]+>', '', line)
-        
+
         # Check if line contains Japanese characters
         if jp_pattern.search(clean_line):
-            japanese_segments.append(clean_line.strip())
-    
-    return japanese_segments
+            yield line_offset + idx, clean_line.strip()
 
 # Initialize global analyzer instance
 _analyzer = None
@@ -323,25 +327,42 @@ def analyze_transcript_vocab(transcript_text: str) -> Dict[str, List[Dict]]:
     """
     if not USE_GPT_VOCAB_ANALYSIS:
         return {"vocabulary": [], "kanji_only": [], "katakana_words": []}
-    
-    window_text = transcript_text[-GPT_VOCAB_WINDOW:] if GPT_VOCAB_WINDOW > 0 else transcript_text
-    japanese_segments = extract_japanese_from_transcript(window_text)
+
+    if GPT_VOCAB_WINDOW > 0:
+        window_text = transcript_text[-GPT_VOCAB_WINDOW:]
+        line_offset = transcript_text[:-GPT_VOCAB_WINDOW].count('\n')
+    else:
+        window_text = transcript_text
+        line_offset = 0
+
+    japanese_segments = list(
+        extract_japanese_from_transcript(window_text, line_offset)
+    )
     if not japanese_segments:
         return {"vocabulary": [], "kanji_only": [], "katakana_words": []}
 
-    new_segments = []
-    for seg in japanese_segments:
+    new_segments: List[Tuple[int, str]] = []
+    for line_index, seg in japanese_segments:
         seg_hash = _sha1(seg)
         if seg_hash not in _analyzed_hashes:
             _analyzed_hashes.add(seg_hash)
-            new_segments.append(seg)
+            new_segments.append((line_index, seg))
 
     if not new_segments:
         return {"vocabulary": [], "kanji_only": [], "katakana_words": []}
 
-    combined_text = '\n'.join(new_segments)
     analyzer = get_analyzer()
-    return analyzer.analyze_text(combined_text)
+    batch_results = analyzer.analyze_batch([seg for _, seg in new_segments])
+
+    combined = {"vocabulary": [], "kanji_only": [], "katakana_words": []}
+    for (line_index, _), result in zip(new_segments, batch_results):
+        for key in combined.keys():
+            for item in result.get(key, []):
+                enriched = dict(item)
+                enriched["line_index"] = line_index
+                combined[key].append(enriched)
+
+    return combined
 
 if __name__ == "__main__":
     # Test the analyzer

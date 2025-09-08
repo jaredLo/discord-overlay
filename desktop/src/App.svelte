@@ -21,17 +21,18 @@
   let sidebarOpen = true
   const SIDEBAR_W_OPEN = 260
   const SIDEBAR_W_CLOSED = 26
-  type Vocab = { 
-    ja: string, 
-    read?: string, 
-    en: string, 
+  type Vocab = {
+    ja: string,
+    read?: string,
+    en: string,
     ctx?: string,
     meanings?: string[],
     kanji_breakdown?: Array<{kanji: string, reading: string, meaning: string}>,
     word_type?: string,
     nuance?: string,
     usage_examples?: string[],
-    enhanced?: boolean
+    enhanced?: boolean,
+    line_index?: number
   }
   
   // Enhanced vocabulary types from ChatGPT
@@ -44,6 +45,7 @@
     kanji_breakdown?: Array<{kanji: string, reading: string, meaning: string}>
     usage_notes?: string
     examples?: string[]
+    line_index: number
   }
   
   type KanjiInfo = {
@@ -52,6 +54,7 @@
     readings_kun: string[]
     meaning_en: string
     stroke_count?: number
+    line_index: number
   }
   
   type KatakanaWord = {
@@ -59,6 +62,7 @@
     reading_hiragana: string
     meaning_en: string
     origin?: string
+    line_index: number
   }
   let vocabs: Vocab[] = []
   let vocabsUniq: Array<Vocab & { count: number }> = []
@@ -178,9 +182,21 @@
         const raw = (r?.text ?? r?.html ?? '')
         if (raw !== transcriptRaw) {
           transcriptRaw = raw
-          // Render as Markdown with single-line breaks preserved, stripping vocab lines from main view
-          const display = stripVocabSections(transcriptRaw)
-          let html = marked.parse(display, { breaks: true, gfm: true }) as string
+          // Render transcript lines with original line indices for highlighting
+          const lines = transcriptRaw.split(/\r?\n/)
+          const kept: Array<{ index: number, text: string }> = []
+          for (let i = 0; i < lines.length; i++) {
+            const lineRaw = lines[i]
+            const plain = stripTags(lineRaw).trim()
+            if (/^(Vocab:|📚\s*Context Vocab:)/.test(plain)) continue
+            const cleaned = lineRaw.replace(/\s*Vocab:\s.*$/, '')
+            kept.push({ index: i, text: cleaned })
+          }
+          const htmlLines = kept.map(({ index, text }) => {
+            const lineHtml = marked.parseInline(text, { gfm: true, breaks: true }) as string
+            return `<p data-line-index="${index}">${lineHtml}</p>`
+          })
+          let html = htmlLines.join('\n')
           // Post-process: wrap readings inside parentheses after colored spans
           try {
             const re = new RegExp('(<span\\\b[^>]*style=\\"[^\\"]*color:[^\\\";]+[^\\\">]*>[^<]+<\\/span>)\\(([^)、]+)([)、])', 'g')
@@ -349,19 +365,6 @@
     try { return s.replace(/<[^>]+>/g, '') } catch { return s }
   }
 
-  function stripVocabSections(text: string): string {
-    const lines = text.split(/\r?\n/)
-    const kept: string[] = []
-    for (const line of lines) {
-      const plain = stripTags(line).trim()
-      if (/^(Vocab:|📚\s*Context Vocab:)/.test(plain)) continue
-      // Also remove trailing inline 'Vocab: ...' if present on same line
-      const cleaned = line.replace(/\s*Vocab:\s.*$/, '')
-      kept.push(cleaned)
-    }
-    return kept.join('\n')
-  }
-
   function extractVocabs(text: string): Vocab[] {
     const lines = text.split(/\r?\n/)
     const out: Vocab[] = []
@@ -487,6 +490,16 @@
     }
   }
 
+  function highlightTranscriptLine(idx?: number) {
+    const container = transcriptEl
+    if (!container) return
+    const prev = container.querySelector('.line-highlight') as HTMLElement | null
+    if (prev) prev.classList.remove('line-highlight')
+    if (idx === undefined) return
+    const target = container.querySelector(`[data-line-index="${idx}"]`) as HTMLElement | null
+    if (target) target.classList.add('line-highlight')
+  }
+
   // Enhanced hover handlers for vocabulary items
   function onVocabEnter(e: MouseEvent, v: Vocab) {
     const el = e.currentTarget as HTMLElement
@@ -496,6 +509,7 @@
     hoverTop = Math.max(8, r.top)
     hoverLeft = r.right + 10
     hoverVisible = true
+    highlightTranscriptLine(v.line_index)
   }
   function onVocabMove(e: MouseEvent) {
     if (!hoverVisible) return
@@ -505,9 +519,10 @@
     const rightPref = e.clientX + 12 + bubbleWidth
     if (rightPref < vw - 8) { hoverLeft = e.clientX + 12 } else { hoverLeft = Math.max(8, e.clientX - 12 - bubbleWidth) }
   }
-  function onVocabLeave() { 
+  function onVocabLeave() {
     hoverVisible = false
     hoverVocab = null
+    highlightTranscriptLine()
   }
 
   function buildSuggestions(text: string, exclude: Set<string>): Suggest[] {
@@ -541,14 +556,15 @@
         {#each enhancedVocabTimeline as v}
           <div class="vocab-item enhanced"
                on:mouseenter={(e) => onVocabEnter(e, {
-                 ja: v.surface, 
+                 ja: v.surface,
                  read: v.reading_hiragana,
                  en: v.meaning_en,
                  word_type: v.word_type,
                  kanji_breakdown: v.kanji_breakdown,
                  usage_examples: v.examples,
                  nuance: v.usage_notes,
-                 enhanced: true
+                 enhanced: true,
+                 line_index: v.line_index
                })}
                on:mousemove={(e) => onVocabMove(e)}
                on:mouseleave={onVocabLeave}>
@@ -571,7 +587,8 @@
                    read: kanji.readings_kun.concat(kanji.readings_on).join('・'),
                    en: kanji.meaning_en,
                    word_type: 'kanji',
-                   enhanced: true
+                   enhanced: true,
+                   line_index: kanji.line_index
                  })}
                  on:mousemove={(e) => onVocabMove(e)}
                  on:mouseleave={onVocabLeave}>
@@ -593,7 +610,8 @@
                    read: kata.reading_hiragana,
                    en: kata.meaning_en,
                    word_type: 'katakana',
-                   enhanced: true
+                   enhanced: true,
+                   line_index: kata.line_index
                  })}
                  on:mousemove={(e) => onVocabMove(e)}
                  on:mouseleave={onVocabLeave}>

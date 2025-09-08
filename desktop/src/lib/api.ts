@@ -78,6 +78,7 @@ export class ApiClient {
         kanji_breakdown?: Array<{kanji: string, reading: string, meaning: string}>
         usage_notes?: string
         examples?: string[]
+        line_index: number
       }>
       kanji_only: Array<{
         kanji: string
@@ -85,12 +86,14 @@ export class ApiClient {
         readings_kun: string[]
         meaning_en: string
         stroke_count?: number
+        line_index: number
       }>
       katakana_words: Array<{
         surface: string
         reading_hiragana: string
         meaning_en: string
         origin?: string
+        line_index: number
       }>
       error?: string
     }

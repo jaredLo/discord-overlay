@@ -490,9 +490,9 @@ def get_enhanced_vocab():
                 "katakana_words": []
             })
         
-        # Analyze the transcript text
+        # Analyze the transcript text (items include original line_index)
         analysis = analyze_transcript_vocab(text)
-        
+
         return JSONResponse({
             "enabled": True,
             "vocabulary": analysis.get("vocabulary", []),
