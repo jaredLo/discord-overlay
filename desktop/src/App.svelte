@@ -262,6 +262,10 @@
     return s.replace(/[.*+?^${}()|\[\]\\]/g, '\\$&')
   }
 
+  function escapeAttr(s: string): string {
+    return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
+  }
+
   function stripVocabSections(text: string): string {
     const lines = text.split(/\r?\n/)
     const kept: string[] = []
@@ -407,7 +411,8 @@
       if (!ja) continue
       try {
         const re = new RegExp(escapeRegExp(ja), 'g')
-        out = out.replace(re, `<span class="vocab-inline" data-ja="${ja}">${ja}</span>`)
+        const attrs = `data-ja="${escapeAttr(ja)}"${v.read ? ` data-read="${escapeAttr(v.read)}"` : ''}${v.en ? ` data-en="${escapeAttr(v.en)}"` : ''}`
+        out = out.replace(re, `<span class="vocab-inline" ${attrs}>${ja}</span>`)
       } catch {}
     }
     return out
@@ -432,8 +437,8 @@
   }
 
   // Hover handlers for vocabulary items
-  function highlightContext(ctx?: string, ja?: string) {
-    if (!ctx) return
+  function highlightContext(v?: Vocab) {
+    if (!v || !v.ctx) return
     const container = transcriptEl?.querySelector('.content')
     if (!container) return
     if (highlightedEl) {
@@ -444,14 +449,13 @@
     highlightedHtml = null
     const nodes = Array.from(container.querySelectorAll('p, li')) as HTMLElement[]
     for (const n of nodes) {
-      if (n.textContent && n.textContent.includes(ctx)) {
+      if (n.textContent && n.textContent.includes(v.ctx)) {
         highlightedEl = n
         highlightedHtml = n.innerHTML
         n.classList.add('vocab-highlight')
-        if (ja) {
-          const re = new RegExp(escapeRegExp(ja), 'g')
-          n.innerHTML = n.innerHTML.replace(re, `<span class="vocab-inline">${ja}</span>`)
-        }
+        const re = new RegExp(escapeRegExp(v.ja), 'g')
+        const attrs = `data-ja="${escapeAttr(v.ja)}"${v.read ? ` data-read="${escapeAttr(v.read)}"` : ''}${v.en ? ` data-en="${escapeAttr(v.en)}"` : ''}`
+        n.innerHTML = n.innerHTML.replace(re, `<span class="vocab-inline" ${attrs}>${v.ja}</span>`)
         break
       }
     }
@@ -472,7 +476,7 @@
     hoverTop = Math.max(8, r.top)
     hoverLeft = r.right + 10
     hoverVisible = true
-    highlightContext(v.ctx, v.ja)
+    highlightContext(v)
   }
   function onVocabMove(e: MouseEvent) {
     if (!hoverVisible) return
@@ -498,8 +502,10 @@
       return
     }
     const ja = span.dataset.ja || span.textContent || ''
-    const v = vocabsUniq.find(x => x.ja === ja)
-    if (!v) return
+    let v: Vocab | undefined = vocabsUniq.find(x => x.ja === ja)
+    if (!v) {
+      v = { ja, read: span.dataset.read, en: span.dataset.en || '' }
+    }
     hoverVocab = v
     hoverVisible = true
     highlightSidebar(ja)
