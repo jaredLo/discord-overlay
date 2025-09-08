@@ -10,7 +10,6 @@
 
   let transcriptHtml = ''
   let transcriptRaw = ''
-  let asrBackend = ''
   let waveData: number[] = []
   let transcriptEl: HTMLDivElement | null = null
   let followTail = true
@@ -177,9 +176,6 @@
     }
     tPoll = setInterval(pollTranscript, 300)
     pollTranscript()
-
-    // Read health once (no gating; suggestions default on)
-    try { const h = await client.health(); asrBackend = (h?.asr_backend || '').toLowerCase() } catch {}
 
     // ASR debug poll (always used to feed Raw transcription; UI debug panel gated separately)
     const pollAsr: any = async () => {
@@ -551,13 +547,7 @@
   <div class="main">
     <div class="panel transcript" bind:this={transcriptEl} on:scroll={updateScrollState} on:mouseup={updateScrollState}>
       <div class="content" on:dblclick={scrollToBottom} on:mousemove={onTranscriptMove} on:mouseleave={onTranscriptLeave}>
-        {#if asrBackend === 'openai'}
-          {@html trustHtml(transcriptHtml)}
-        {:else}
-          {#each rawTimeline as r}
-            <p>{r.text}</p>
-          {/each}
-        {/if}
+        {@html trustHtml(transcriptHtml)}
       </div>
     </div>
 
