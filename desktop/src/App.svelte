@@ -41,6 +41,7 @@
   let hoverTop = 0
   let hoverLeft = 0
   let highlightedEl: HTMLElement | null = null
+  let highlightedHtml: string | null = null
   import { appWindow } from '@tauri-apps/api/window'
   import { invoke } from '@tauri-apps/api/tauri'
   import SidebarPanel from './lib/components/SidebarPanel.svelte'
@@ -257,6 +258,10 @@
     try { return s.replace(/<[^>]+>/g, '') } catch { return s }
   }
 
+  function escapeRegExp(s: string): string {
+    return s.replace(/[.*+?^${}()|\[\]\\]/g, '\\$&')
+  }
+
   function stripVocabSections(text: string): string {
     const lines = text.split(/\r?\n/)
     const kept: string[] = []
@@ -396,24 +401,37 @@
   }
 
   // Hover handlers for vocabulary items
-  function highlightContext(ctx?: string) {
+  function highlightContext(ctx?: string, ja?: string) {
     if (!ctx) return
     const container = transcriptEl?.querySelector('.content')
     if (!container) return
-    if (highlightedEl) highlightedEl.classList.remove('vocab-highlight')
+    if (highlightedEl) {
+      highlightedEl.classList.remove('vocab-highlight')
+      if (highlightedHtml !== null) highlightedEl.innerHTML = highlightedHtml
+    }
     highlightedEl = null
+    highlightedHtml = null
     const nodes = Array.from(container.querySelectorAll('p, li')) as HTMLElement[]
     for (const n of nodes) {
       if (n.textContent && n.textContent.includes(ctx)) {
-        n.classList.add('vocab-highlight')
         highlightedEl = n
+        highlightedHtml = n.innerHTML
+        n.classList.add('vocab-highlight')
+        if (ja) {
+          const re = new RegExp(escapeRegExp(ja), 'g')
+          n.innerHTML = n.innerHTML.replace(re, `<span class="vocab-inline">${ja}</span>`)
+        }
         break
       }
     }
   }
   function clearHighlight() {
-    if (highlightedEl) highlightedEl.classList.remove('vocab-highlight')
+    if (highlightedEl) {
+      highlightedEl.classList.remove('vocab-highlight')
+      if (highlightedHtml !== null) highlightedEl.innerHTML = highlightedHtml
+    }
     highlightedEl = null
+    highlightedHtml = null
   }
   function onVocabEnter(e: MouseEvent, v: Vocab) {
     const el = e.currentTarget as HTMLElement
@@ -423,7 +441,7 @@
     hoverTop = Math.max(8, r.top)
     hoverLeft = r.right + 10
     hoverVisible = true
-    highlightContext(v.ctx)
+    highlightContext(v.ctx, v.ja)
   }
   function onVocabMove(e: MouseEvent) {
     if (!hoverVisible) return

@@ -24,6 +24,7 @@ input, button, textarea { font-size: 14px; }
 .transcript .content ol { padding-left: 24px; }
 .transcript .content .ja-inline span { color: #ef4444 !important; font-weight: 700; }
 .transcript .content .reading-inline { color: #064e3b; font-weight: 700; }
+.vocab-inline { color: #ef4444; font-weight: 700; }
 .wave { height: 100px; }
 .wave canvas { width: 100%; height: 100%; display: block; }
 .scroll-arrow { position: absolute; right: 16px; bottom: 140px; background: rgba(15,23,42,0.8); border: 1px solid rgba(255,255,255,0.08); border-radius: 999px; padding: 6px 10px; cursor: pointer; user-select: none; }
