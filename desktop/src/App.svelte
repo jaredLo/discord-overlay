@@ -147,16 +147,16 @@
           // Render as Markdown with single-line breaks preserved, stripping vocab lines from main view
           const display = stripVocabSections(transcriptRaw)
           let html = marked.parse(display, { breaks: true, gfm: true }) as string
+          vocabs = extractVocabs(transcriptRaw)
+          vocabsUniq = dedupeVocabs(vocabs)
+          vocabsTimeline = accrueCounts(vocabs)
           // Post-process: wrap readings inside parentheses after colored spans
           try {
             const re = new RegExp('(<span\\\b[^>]*style=\\"[^\\"]*color:[^\\\";]+[^\\\">]*>[^<]+<\\/span>)\\(([^)、]+)([)、])', 'g')
             html = html.replace(re, (_m, s1, reading, tail) => `<span class=\"ja-inline\">${s1}</span>(<span class=\"reading-inline\">${reading}</span>${tail}`)
           } catch {}
+          html = colorizeTranscript(html, vocabsUniq)
           transcriptHtml = html || ''
-          // Extract vocabs in order of appearance
-          vocabs = extractVocabs(transcriptRaw)
-          vocabsUniq = dedupeVocabs(vocabs)
-          vocabsTimeline = accrueCounts(vocabs)
           // Raw transcription now sourced from ASR debug endpoint (handled in poll below)
           // Build right-side suggestions (exclude existing left vocabs), enrich via API once per update
           if (detailsEnabled) {
@@ -400,6 +400,37 @@
     }
   }
 
+  function colorizeTranscript(html: string, list: Array<Vocab & { count: number }>): string {
+    let out = html
+    for (const v of list) {
+      const ja = (v.ja || '').trim()
+      if (!ja) continue
+      try {
+        const re = new RegExp(escapeRegExp(ja), 'g')
+        out = out.replace(re, `<span class="vocab-inline" data-ja="${ja}">${ja}</span>`)
+      } catch {}
+    }
+    return out
+  }
+
+  let sidebarHighlighted: HTMLElement | null = null
+  function highlightSidebar(ja: string) {
+    if (sidebarHighlighted) sidebarHighlighted.classList.remove('vocab-highlight')
+    try {
+      const sel = document.querySelector(`.vocab-item[data-ja="${CSS.escape(ja)}"]`) as HTMLElement | null
+      if (sel) {
+        sidebarHighlighted = sel
+        sel.classList.add('vocab-highlight')
+      } else {
+        sidebarHighlighted = null
+      }
+    } catch { sidebarHighlighted = null }
+  }
+  function clearSidebar() {
+    if (sidebarHighlighted) sidebarHighlighted.classList.remove('vocab-highlight')
+    sidebarHighlighted = null
+  }
+
   // Hover handlers for vocabulary items
   function highlightContext(ctx?: string, ja?: string) {
     if (!ctx) return
@@ -455,6 +486,29 @@
     hoverVisible = false
     hoverVocab = null
     clearHighlight()
+    clearSidebar()
+  }
+
+  function onTranscriptMove(e: MouseEvent) {
+    const span = (e.target as HTMLElement).closest('.vocab-inline') as HTMLElement | null
+    if (!span) {
+      hoverVisible = false
+      hoverVocab = null
+      clearSidebar()
+      return
+    }
+    const ja = span.dataset.ja || span.textContent || ''
+    const v = vocabsUniq.find(x => x.ja === ja)
+    if (!v) return
+    hoverVocab = v
+    hoverVisible = true
+    highlightSidebar(ja)
+    onVocabMove(e)
+  }
+  function onTranscriptLeave() {
+    hoverVisible = false
+    hoverVocab = null
+    clearSidebar()
   }
 
   function buildSuggestions(text: string, exclude: Set<string>): Suggest[] {
@@ -484,7 +538,7 @@
   <SidebarPanel side="left" title="Vocabs" count={vocabsUniq.length} open={sidebarOpen} widthOpen={SIDEBAR_W_OPEN} widthClosed={SIDEBAR_W_CLOSED} fluid={true} on:toggle={() => sidebarOpen = !sidebarOpen}>
     <div class="vocabs-list" on:scroll={() => { hoverVisible = false; clearHighlight() }}>
       {#each vocabsTimeline as v}
-        <div class="vocab-item"
+        <div class="vocab-item" data-ja={v.ja}
              on:mouseenter={(e) => onVocabEnter(e, v)}
              on:mousemove={(e) => onVocabMove(e)}
              on:mouseleave={onVocabLeave}>
@@ -499,7 +553,7 @@
 
   <div class="main">
     <div class="panel transcript" bind:this={transcriptEl} on:scroll={updateScrollState} on:mouseup={updateScrollState}>
-      <div class="content" on:dblclick={scrollToBottom}>
+      <div class="content" on:dblclick={scrollToBottom} on:mousemove={onTranscriptMove} on:mouseleave={onTranscriptLeave}>
         {#if asrBackend === 'openai'}
           {@html trustHtml(transcriptHtml)}
         {:else}
