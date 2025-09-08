@@ -24,7 +24,11 @@ def _load_env_file(path: Path):
             if "=" not in line:
                 continue
             k, v = line.split("=", 1)
-            k = k.strip(); v = v.strip()
+            k = k.strip()
+            v = v.strip()
+            # Remove comments from values
+            if "#" in v:
+                v = v.split("#")[0].strip()
             if k and k not in os.environ:
                 os.environ[k] = v
     except Exception:
@@ -46,6 +50,15 @@ try:
 except Exception:
     _tagger = None; _conv = None; _romaji_conv = None
 ASR_DEBUG_FILE = ROOT / "asr_debug.json"
+
+# Import the ChatGPT vocabulary analyzer
+try:
+    sys.path.insert(0, str(ROOT))
+    from gpt_vocab_analyzer import analyze_transcript_vocab, USE_GPT_VOCAB_ANALYSIS
+except ImportError:
+    def analyze_transcript_vocab(text: str):
+        return {"vocabulary": [], "kanji_only": [], "katakana_words": []}
+    USE_GPT_VOCAB_ANALYSIS = False
 
 listener_proc: Optional[subprocess.Popen] = None
 
@@ -451,3 +464,48 @@ def get_asr_debug():
     except Exception:
         pass
     return JSONResponse({"items": []})
+
+
+@app.get("/api/vocab/enhanced")
+def get_enhanced_vocab():
+    """
+    Get enhanced vocabulary analysis using ChatGPT.
+    Returns detailed vocabulary with readings, meanings, kanji breakdowns, etc.
+    """
+    try:
+        if not USE_GPT_VOCAB_ANALYSIS:
+            return JSONResponse({
+                "enabled": False,
+                "vocabulary": [],
+                "kanji_only": [],
+                "katakana_words": []
+            })
+        
+        text = _read_text(TRANSCRIPT_FILE)
+        if not text.strip():
+            return JSONResponse({
+                "enabled": True,
+                "vocabulary": [],
+                "kanji_only": [],
+                "katakana_words": []
+            })
+        
+        # Analyze the transcript text
+        analysis = analyze_transcript_vocab(text)
+        
+        return JSONResponse({
+            "enabled": True,
+            "vocabulary": analysis.get("vocabulary", []),
+            "kanji_only": analysis.get("kanji_only", []),
+            "katakana_words": analysis.get("katakana_words", [])
+        })
+        
+    except Exception as e:
+        print(f"Enhanced vocab analysis error: {e}")
+        return JSONResponse({
+            "enabled": USE_GPT_VOCAB_ANALYSIS,
+            "error": str(e),
+            "vocabulary": [],
+            "kanji_only": [],
+            "katakana_words": []
+        })

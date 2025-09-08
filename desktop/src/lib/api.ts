@@ -60,4 +60,39 @@ export class ApiClient {
     if (r.status >= 400) throw new Error(`ASR debug failed ${r.status}`)
     return r.data as { items: Array<{ id: string, ts: number, openai?: { text?: string, ms?: number }, remote?: { text?: string, ms?: number } }> }
   }
+
+  async enhancedVocab() {
+    const url = `${this.baseUrl}/api/vocab/enhanced`
+    const t0 = nowMs(); await logClient(`Api.enhancedVocab start url=${url}`)
+    const r = await httpFetch(url, { method: 'GET' }).catch(async (e) => { await logClient(`Api.enhancedVocab error ${e?.message||e}`); throw e })
+    await logClient(`Api.enhancedVocab status=${r.status} dur=${(nowMs()-t0).toFixed(0)}ms`)
+    if (r.status >= 400) throw new Error(`Enhanced vocab failed ${r.status}`)
+    return r.data as {
+      enabled: boolean
+      vocabulary: Array<{
+        surface: string
+        reading_hiragana: string
+        reading_katakana?: string
+        meaning_en: string
+        word_type: string
+        kanji_breakdown?: Array<{kanji: string, reading: string, meaning: string}>
+        usage_notes?: string
+        examples?: string[]
+      }>
+      kanji_only: Array<{
+        kanji: string
+        readings_on: string[]
+        readings_kun: string[]
+        meaning_en: string
+        stroke_count?: number
+      }>
+      katakana_words: Array<{
+        surface: string
+        reading_hiragana: string
+        meaning_en: string
+        origin?: string
+      }>
+      error?: string
+    }
+  }
 }
