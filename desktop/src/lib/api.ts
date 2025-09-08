@@ -92,6 +92,7 @@ export class ApiClient {
         meaning_en: string
         origin?: string
       }>
+      vocab_counts?: Record<string, number>
       error?: string
     }
   }

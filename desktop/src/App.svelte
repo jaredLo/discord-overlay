@@ -271,29 +271,27 @@
           const newVocab = result.vocabulary || []
           const newKanji = result.kanji_only || []
           const newKatakana = result.katakana_words || []
-          
+          const counts = result.vocab_counts || {}
+
           // Update enhanced vocab data
           enhancedVocabData = newVocab
           kanjiData = newKanji
           katakanaData = newKatakana
-          
-          // Build timeline for enhanced vocabulary with counts
-          const vocabCounts = new Map<string, number>()
+
+          // Build timeline for enhanced vocabulary using aggregated counts
           const timeline: Array<EnhancedVocab & { count: number }> = []
-          
           for (const vocab of newVocab) {
             const key = vocab.surface
-            const count = (vocabCounts.get(key) || 0) + 1
-            vocabCounts.set(key, count)
+            const count = counts[key] || 1
             timeline.push({ ...vocab, count })
           }
-          
+
           enhancedVocabTimeline = timeline
         }
       } catch (e) {
         console.error('Enhanced vocab poll error:', e)
-      } finally { 
-        pollEnhancedVocab._busy = false 
+      } finally {
+        pollEnhancedVocab._busy = false
       }
     }
     // Poll less frequently since ChatGPT analysis is more expensive
