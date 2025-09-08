@@ -8,7 +8,7 @@ import os
 import time
 import json
 import threading
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Tuple, Any, Set
 import re
 import requests
 from pathlib import Path
@@ -46,6 +46,7 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-nano-2025-04-14")
 USE_GPT_VOCAB_ANALYSIS = os.getenv("USE_GPT_VOCAB_ANALYSIS", "true").lower() in {"1", "true", "yes", "y"}
 GPT_VOCAB_RATE_LIMIT_MS = int(os.getenv("GPT_VOCAB_RATE_LIMIT_MS", "1000"))
 GPT_VOCAB_BATCH_SIZE = int(os.getenv("GPT_VOCAB_BATCH_SIZE", "8"))
+GPT_VOCAB_WINDOW = int(os.getenv("GPT_VOCAB_WINDOW", "1000"))
 
 # Caching
 _CACHE_DB = "vocab_cache.sqlite"
@@ -300,6 +301,7 @@ def extract_japanese_from_transcript(transcript_text: str) -> List[str]:
 
 # Initialize global analyzer instance
 _analyzer = None
+_analyzed_hashes: Set[str] = set()
 
 def get_analyzer() -> VocabularyAnalyzer:
     """Get the global vocabulary analyzer instance."""
@@ -322,14 +324,22 @@ def analyze_transcript_vocab(transcript_text: str) -> Dict[str, List[Dict]]:
     if not USE_GPT_VOCAB_ANALYSIS:
         return {"vocabulary": [], "kanji_only": [], "katakana_words": []}
     
-    japanese_segments = extract_japanese_from_transcript(transcript_text)
+    window_text = transcript_text[-GPT_VOCAB_WINDOW:] if GPT_VOCAB_WINDOW > 0 else transcript_text
+    japanese_segments = extract_japanese_from_transcript(window_text)
     if not japanese_segments:
         return {"vocabulary": [], "kanji_only": [], "katakana_words": []}
-    
-    # Combine recent segments (last few to avoid overwhelming ChatGPT)
-    recent_segments = japanese_segments[-5:] if len(japanese_segments) > 5 else japanese_segments
-    combined_text = '\n'.join(recent_segments)
-    
+
+    new_segments = []
+    for seg in japanese_segments:
+        seg_hash = _sha1(seg)
+        if seg_hash not in _analyzed_hashes:
+            _analyzed_hashes.add(seg_hash)
+            new_segments.append(seg)
+
+    if not new_segments:
+        return {"vocabulary": [], "kanji_only": [], "katakana_words": []}
+
+    combined_text = '\n'.join(new_segments)
     analyzer = get_analyzer()
     return analyzer.analyze_text(combined_text)
 
