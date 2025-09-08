@@ -55,68 +55,10 @@ input, button, textarea { font-size: 14px; }
 .vocab-en { background: #93c5fd; color: #111827; padding: 2px 6px; border-radius: 4px; }
 .vocab-count { background: #374151; color: #e5e7eb; padding: 1px 6px; border-radius: 999px; font-size: 11px; }
 
-/* Enhanced vocabulary styles */
-.vocab-item.enhanced {
-  border: 1px solid rgba(251,191,36,0.2);
-  background: rgba(251,191,36,0.03);
-}
-
-.vocab-type {
-  background: #6366f1;
-  color: #ffffff;
-  padding: 1px 4px;
-  border-radius: 3px;
-  font-size: 10px;
-  text-transform: uppercase;
-}
-
-.enhanced-badge {
-  background: linear-gradient(45deg, #fbbf24, #f59e0b);
-  padding: 2px 4px;
-  border-radius: 3px;
-  font-size: 10px;
-}
-
-/* Section headers */
-.vocab-section-header {
-  background: rgba(99,102,241,0.1);
-  color: #c7d2fe;
-  padding: 6px 10px;
-  border-radius: 6px;
-  font-weight: 600;
-  font-size: 12px;
-  text-align: center;
-  margin: 8px 0 4px 0;
-  border: 1px solid rgba(99,102,241,0.2);
-}
-
-/* Kanji-specific styles */
-.vocab-item.kanji-item {
-  border-color: rgba(239,68,68,0.2);
-  background: rgba(239,68,68,0.03);
-}
-
-.stroke-count {
-  background: #374151;
-  color: #d1d5db;
-  padding: 1px 4px;
-  border-radius: 3px;
-  font-size: 10px;
-}
-
-/* Katakana-specific styles */
-.vocab-item.katakana-item {
-  border-color: rgba(34,197,94,0.2);
-  background: rgba(34,197,94,0.03);
-}
-
-.origin-tag {
-  background: #059669;
-  color: #ffffff;
-  padding: 1px 4px;
-  border-radius: 3px;
-  font-size: 10px;
-  text-transform: uppercase;
+/* Highlight corresponding transcript line when hovering vocab */
+.vocab-highlight {
+  background: rgba(250,204,21,0.15);
+  box-shadow: 0 0 0 2px rgba(250,204,21,0.35);
 }
 
 /* Global hover bubble positioned near sidebar item (fixed) */
@@ -135,22 +77,6 @@ input, button, textarea { font-size: 14px; }
   word-break: break-word;
 }
 
-/* Enhanced vocabulary hover bubble */
-.enhanced-hover-bubble {
-  position: fixed;
-  max-width: 520px;
-  background: rgba(11,15,23,0.98);
-  border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 12px;
-  padding: 16px;
-  box-shadow: 0 12px 32px rgba(0,0,0,0.4);
-  color: #e5e7eb;
-  z-index: 2000;
-  pointer-events: none;
-  backdrop-filter: blur(8px);
-  font-size: 14px;
-  line-height: 1.4;
-}
 
 .hover-header {
   display: flex;
@@ -178,12 +104,6 @@ input, button, textarea { font-size: 14px; }
   font-weight: 500;
 }
 
-.enhanced-badge {
-  background: linear-gradient(45deg, #fbbf24, #f59e0b);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 12px;
-}
 
 .hover-type {
   color: #9ca3af;

@@ -8,12 +8,21 @@ import os
 import time
 import json
 import threading
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Tuple, Any, Set
 import re
 import requests
 from pathlib import Path
 import sqlite3
 import hashlib
+
+try:
+    from fugashi import Tagger as _FallbackTagger
+    from pykakasi import kakasi as _kakasi
+    _fb_tagger = _FallbackTagger()
+    _fb_kks = _kakasi(); _fb_kks.setMode("J","H"); _fb_conv = _fb_kks.getConverter()
+except Exception:
+    _fb_tagger = None
+    _fb_conv = None
 
 # Load environment variables (similar to listener.py)
 def _load_env_file(path: str = ".env"):
@@ -46,6 +55,7 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-nano-2025-04-14")
 USE_GPT_VOCAB_ANALYSIS = os.getenv("USE_GPT_VOCAB_ANALYSIS", "true").lower() in {"1", "true", "yes", "y"}
 GPT_VOCAB_RATE_LIMIT_MS = int(os.getenv("GPT_VOCAB_RATE_LIMIT_MS", "1000"))
 GPT_VOCAB_BATCH_SIZE = int(os.getenv("GPT_VOCAB_BATCH_SIZE", "8"))
+GPT_VOCAB_WINDOW = int(os.getenv("GPT_VOCAB_WINDOW", "1000"))
 
 # Caching
 _CACHE_DB = "vocab_cache.sqlite"
@@ -109,6 +119,34 @@ def _cache_analysis(text: str, response: Dict):
     except Exception:
         pass
 
+def _to_hira_fb(s: str) -> str:
+    if _fb_conv is None:
+        return s
+    try:
+        return "".join(p["hira"] for p in _fb_conv.convert(s))
+    except Exception:
+        return s
+
+def _fallback_basic_vocab(text: str) -> Dict[str, List[Dict]]:
+    """Simple fallback analysis using fugashi if ChatGPT is unavailable or returns empty."""
+    if _fb_tagger is None:
+        return {"vocabulary": []}
+    entries: List[Dict] = []
+    try:
+        for token in _fb_tagger(text):
+            pos = getattr(token.feature, "pos1", "")
+            if pos not in ("名詞", "動詞", "形容詞"):
+                continue
+            reading = getattr(token.feature, "pron", None) or getattr(token.feature, "kana", None) or ""
+            entries.append({
+                "surface": token.surface,
+                "reading_hiragana": _to_hira_fb(reading),
+                "meaning_en": "",
+            })
+    except Exception:
+        return {"vocabulary": []}
+    return {"vocabulary": entries}
+
 # Rate limiting
 _last_request_time = {"t": 0.0}
 _rate_limit_lock = threading.Lock()
@@ -133,46 +171,13 @@ def _chatgpt_vocab_request(japanese_text: str) -> Optional[Dict]:
         "Content-Type": "application/json",
     }
     
-    system_prompt = """You are a Japanese vocabulary analyzer. Given Japanese text, extract vocabulary words and analyze them.
+    system_prompt = (
+        "You are a Japanese vocabulary extractor. "
+        "Given Japanese text, return only a JSON object with a 'vocabulary' array. "
+        "Each item must have 'surface', 'reading_hiragana', and 'meaning_en'."
+    )
 
-Return STRICT JSON only with this structure:
-{
-  "vocabulary": [
-    {
-      "surface": "Japanese word",
-      "reading_hiragana": "hiragana reading",
-      "reading_katakana": "katakana reading (if applicable)",
-      "meaning_en": "English meaning",
-      "word_type": "noun/verb/adjective/etc",
-      "kanji_breakdown": [
-        {"kanji": "漢", "reading": "かん", "meaning": "Chinese character"}
-      ],
-      "usage_notes": "brief usage explanation",
-      "examples": ["example sentence 1", "example sentence 2"]
-    }
-  ],
-  "kanji_only": [
-    {
-      "kanji": "漢",
-      "readings_on": ["カン", "ガン"],
-      "readings_kun": ["から"],
-      "meaning_en": "Chinese character",
-      "stroke_count": 13
-    }
-  ],
-  "katakana_words": [
-    {
-      "surface": "カタカナ",
-      "reading_hiragana": "かたかな", 
-      "meaning_en": "katakana",
-      "origin": "native/foreign"
-    }
-  ]
-}
-
-Extract only meaningful vocabulary (nouns, verbs, adjectives). Skip particles, conjunctions, and common words. Focus on words learners would want to study."""
-
-    user_content = f"Analyze this Japanese text for vocabulary:\n\n{japanese_text}"
+    user_content = f"Extract vocabulary from this Japanese text:\n\n{japanese_text}"
     
     payload = {
         "model": OPENAI_MODEL,
@@ -198,108 +203,126 @@ Extract only meaningful vocabulary (nouns, verbs, adjectives). Skip particles, c
 
 class VocabularyAnalyzer:
     """Main vocabulary analyzer using ChatGPT."""
-    
+
     def __init__(self):
         self.session = requests.Session()
         _init_cache_db()
-    
-    def analyze_text(self, japanese_text: str) -> Dict[str, List[Dict]]:
+
+    def analyze_text(self, japanese_text: str) -> Optional[Dict[str, List[Dict]]]:
         """
         Analyze Japanese text and return vocabulary analysis.
-        
+
         Returns:
-            Dict with keys: 'vocabulary', 'kanji_only', 'katakana_words'
+            Dict with key 'vocabulary' or None if the request failed.
         """
         if not japanese_text.strip():
-            return {"vocabulary": [], "kanji_only": [], "katakana_words": []}
-        
+            return {"vocabulary": []}
+
         # Check cache first
         cached = _get_cached_analysis(japanese_text)
         if cached:
             return cached
-        
+
         # Make ChatGPT request
         result = _chatgpt_vocab_request(japanese_text)
-        if not result:
-            return {"vocabulary": [], "kanji_only": [], "katakana_words": []}
-        
+        if result is None:
+            return None
+
         # Normalize response structure
         normalized = {
             "vocabulary": result.get("vocabulary", []),
-            "kanji_only": result.get("kanji_only", []),
-            "katakana_words": result.get("katakana_words", [])
         }
-        
+
         # Cache the result
         _cache_analysis(japanese_text, normalized)
-        
+
         return normalized
     
-    def analyze_batch(self, text_segments: List[str]) -> List[Dict[str, List[Dict]]]:
+    def analyze_batch(self, text_segments: List[str]) -> List[Optional[Dict[str, List[Dict]]]]:
         """
         Analyze multiple text segments in batch.
-        
+
         Args:
             text_segments: List of Japanese text segments to analyze
-            
+
         Returns:
-            List of analysis results, one per segment
+            List of analysis results, one per segment (None on failure)
         """
-        results = []
-        
+        results: List[Optional[Dict[str, List[Dict]]]] = []
+
         # Process in batches to respect rate limits
         batch_size = GPT_VOCAB_BATCH_SIZE
         for i in range(0, len(text_segments), batch_size):
             batch = text_segments[i:i + batch_size]
-            
+
             for text in batch:
                 result = self.analyze_text(text)
                 results.append(result)
-                
+
                 # Rate limit between requests in batch
                 if len(batch) > 1 and text != batch[-1]:
                     time.sleep(GPT_VOCAB_RATE_LIMIT_MS / 1000 / 2)
-        
+
         return results
 
-def extract_japanese_from_transcript(transcript_text: str) -> List[str]:
+def extract_japanese_from_transcript(transcript_text: str, max_segment_chars: int = 200) -> List[str]:
     """
     Extract Japanese sentences/segments from transcript text.
-    Filters out vocab lines and English translations.
+    Filters out vocab lines and English translations and splits long text into
+    smaller chunks so more vocabulary can be captured.
     """
     if not transcript_text:
         return []
-    
+
     lines = transcript_text.strip().split('\n')
-    japanese_segments = []
-    
+    japanese_segments: List[str] = []
+
     # Japanese character pattern
     jp_pattern = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF々〆ヵヶ]')
-    
+
     for line in lines:
         line = line.strip()
         if not line:
             continue
-        
+
         # Skip vocab lines
         if line.startswith('Vocab:') or '📚' in line:
             continue
-        
+
         # Skip lines that look like English translations (start with lowercase or common EN words)
         if re.match(r'^[a-z]', line) or line.startswith(('The ', 'A ', 'An ', 'I ', 'You ', 'He ', 'She ', 'It ', 'We ', 'They ')):
             continue
-        
+
         # Remove HTML tags
         clean_line = re.sub(r'<[^>]+>', '', line)
-        
+
         # Check if line contains Japanese characters
-        if jp_pattern.search(clean_line):
-            japanese_segments.append(clean_line.strip())
-    
+        if not jp_pattern.search(clean_line):
+            continue
+
+        # Split into sentences and chunk by max_segment_chars
+        sentences = re.split(r'(?<=[。！？!?])', clean_line)
+        buf = ""
+        for sent in sentences:
+            sent = sent.strip()
+            if not sent:
+                continue
+            buf += sent
+            if len(buf) >= max_segment_chars or buf.endswith(('。', '！', '!', '？', '?')):
+                japanese_segments.append(buf.strip())
+                buf = ""
+        if buf:
+            japanese_segments.append(buf.strip())
+
     return japanese_segments
 
 # Initialize global analyzer instance
 _analyzer = None
+_analyzed_hashes: Set[str] = set()
+
+# Aggregated results across processed segments
+_vocab_counts: Dict[str, int] = {}
+_aggregated_vocab: Dict[str, Dict] = {}
 
 def get_analyzer() -> VocabularyAnalyzer:
     """Get the global vocabulary analyzer instance."""
@@ -312,37 +335,58 @@ def get_analyzer() -> VocabularyAnalyzer:
 def analyze_transcript_vocab(transcript_text: str) -> Dict[str, List[Dict]]:
     """
     Analyze vocabulary from transcript text.
-    
+
     Args:
         transcript_text: Raw transcript text containing Japanese
-        
+
     Returns:
-        Combined vocabulary analysis
+        Aggregated vocabulary analysis across all processed segments. Results
+        accumulate over time and include usage counts for each vocabulary word.
     """
     if not USE_GPT_VOCAB_ANALYSIS:
-        return {"vocabulary": [], "kanji_only": [], "katakana_words": []}
-    
-    japanese_segments = extract_japanese_from_transcript(transcript_text)
+        return {"vocabulary": [], "vocab_counts": {}}
+
+    window_text = transcript_text[-GPT_VOCAB_WINDOW:] if GPT_VOCAB_WINDOW > 0 else transcript_text
+    japanese_segments = extract_japanese_from_transcript(window_text)
     if not japanese_segments:
-        return {"vocabulary": [], "kanji_only": [], "katakana_words": []}
-    
-    # Combine recent segments (last few to avoid overwhelming ChatGPT)
-    recent_segments = japanese_segments[-5:] if len(japanese_segments) > 5 else japanese_segments
-    combined_text = '\n'.join(recent_segments)
-    
+        return {
+            "vocabulary": list(_aggregated_vocab.values()),
+            "vocab_counts": dict(_vocab_counts),
+        }
+
     analyzer = get_analyzer()
-    return analyzer.analyze_text(combined_text)
+
+    for seg in japanese_segments:
+        seg_hash = _sha1(seg)
+        if seg_hash in _analyzed_hashes:
+            continue
+
+        result = _get_cached_analysis(seg)
+        if result is None:
+            result = analyzer.analyze_text(seg)
+        if not result or not result.get("vocabulary"):
+            result = _fallback_basic_vocab(seg)
+        if not result or not result.get("vocabulary"):
+            continue
+
+        # Aggregate vocabulary entries and counts
+        for vocab in result.get("vocabulary", []):
+            surf = vocab.get("surface")
+            if not surf:
+                continue
+            _vocab_counts[surf] = _vocab_counts.get(surf, 0) + 1
+            if surf not in _aggregated_vocab:
+                _aggregated_vocab[surf] = vocab
+
+        _analyzed_hashes.add(seg_hash)
+
+    return {
+        "vocabulary": list(_aggregated_vocab.values()),
+        "vocab_counts": dict(_vocab_counts),
+    }
 
 if __name__ == "__main__":
-    # Test the analyzer
-    test_text = """
-    聞いてないよ!分かったんじゃんかい! 負け!
-    え、どうなったの?
-    変な ええ
-    やられた、騙された えー、1200
-    200円で買います
-    """
-    
+    sample = "聞いてないよ!分かったんじゃんかい! 負け!"
     print("Testing ChatGPT vocabulary analyzer...")
-    result = analyze_transcript_vocab(test_text)
+    result = analyze_transcript_vocab(sample)
     print(json.dumps(result, indent=2, ensure_ascii=False))

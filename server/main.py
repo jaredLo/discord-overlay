@@ -468,17 +468,12 @@ def get_asr_debug():
 
 @app.get("/api/vocab/enhanced")
 def get_enhanced_vocab():
-    """
-    Get enhanced vocabulary analysis using ChatGPT.
-    Returns detailed vocabulary with readings, meanings, kanji breakdowns, etc.
-    """
+    """Get vocabulary analysis using ChatGPT."""
     try:
         if not USE_GPT_VOCAB_ANALYSIS:
             return JSONResponse({
                 "enabled": False,
                 "vocabulary": [],
-                "kanji_only": [],
-                "katakana_words": []
             })
         
         text = _read_text(TRANSCRIPT_FILE)
@@ -486,8 +481,6 @@ def get_enhanced_vocab():
             return JSONResponse({
                 "enabled": True,
                 "vocabulary": [],
-                "kanji_only": [],
-                "katakana_words": []
             })
         
         # Analyze the transcript text
@@ -496,8 +489,7 @@ def get_enhanced_vocab():
         return JSONResponse({
             "enabled": True,
             "vocabulary": analysis.get("vocabulary", []),
-            "kanji_only": analysis.get("kanji_only", []),
-            "katakana_words": analysis.get("katakana_words", [])
+            "vocab_counts": analysis.get("vocab_counts", {}),
         })
         
     except Exception as e:
@@ -506,6 +498,4 @@ def get_enhanced_vocab():
             "enabled": USE_GPT_VOCAB_ANALYSIS,
             "error": str(e),
             "vocabulary": [],
-            "kanji_only": [],
-            "katakana_words": []
         })

@@ -30,52 +30,17 @@
     kanji_breakdown?: Array<{kanji: string, reading: string, meaning: string}>,
     word_type?: string,
     nuance?: string,
-    usage_examples?: string[],
-    enhanced?: boolean
-  }
-  
-  // Enhanced vocabulary types from ChatGPT
-  type EnhancedVocab = {
-    surface: string
-    reading_hiragana: string
-    reading_katakana?: string
-    meaning_en: string
-    word_type: string
-    kanji_breakdown?: Array<{kanji: string, reading: string, meaning: string}>
-    usage_notes?: string
-    examples?: string[]
-  }
-  
-  type KanjiInfo = {
-    kanji: string
-    readings_on: string[]
-    readings_kun: string[]
-    meaning_en: string
-    stroke_count?: number
-  }
-  
-  type KatakanaWord = {
-    surface: string
-    reading_hiragana: string
-    meaning_en: string
-    origin?: string
+    usage_examples?: string[]
   }
   let vocabs: Vocab[] = []
   let vocabsUniq: Array<Vocab & { count: number }> = []
   let vocabsTimeline: Array<Vocab & { count: number }> = []
-  
-  // Enhanced vocabulary from ChatGPT
-  let enhancedVocabEnabled = false
-  let enhancedVocabData: EnhancedVocab[] = []
-  let kanjiData: KanjiInfo[] = []
-  let katakanaData: KatakanaWord[] = []
-  let enhancedVocabTimeline: Array<EnhancedVocab & { count: number }> = []
-  
   // Enhanced hover bubble state
   let hoverVisible = false
   let hoverVocab: Vocab | null = null
   let hoverTop = 0
   let hoverLeft = 0
+  let highlightedEl: HTMLElement | null = null
   import { appWindow } from '@tauri-apps/api/window'
   import { invoke } from '@tauri-apps/api/tauri'
   import SidebarPanel from './lib/components/SidebarPanel.svelte'
@@ -260,44 +225,6 @@
       finally { pollAsr._busy = false }
     }
     setInterval(pollAsr, 1000); pollAsr()
-
-    // Poll enhanced vocabulary (ChatGPT-powered)
-    const pollEnhancedVocab: any = async () => {
-      if (pollEnhancedVocab._busy) return; pollEnhancedVocab._busy = true
-      try {
-        const result = await client.enhancedVocab()
-        enhancedVocabEnabled = result.enabled
-        if (result.enabled && !result.error) {
-          const newVocab = result.vocabulary || []
-          const newKanji = result.kanji_only || []
-          const newKatakana = result.katakana_words || []
-          
-          // Update enhanced vocab data
-          enhancedVocabData = newVocab
-          kanjiData = newKanji
-          katakanaData = newKatakana
-          
-          // Build timeline for enhanced vocabulary with counts
-          const vocabCounts = new Map<string, number>()
-          const timeline: Array<EnhancedVocab & { count: number }> = []
-          
-          for (const vocab of newVocab) {
-            const key = vocab.surface
-            const count = (vocabCounts.get(key) || 0) + 1
-            vocabCounts.set(key, count)
-            timeline.push({ ...vocab, count })
-          }
-          
-          enhancedVocabTimeline = timeline
-        }
-      } catch (e) {
-        console.error('Enhanced vocab poll error:', e)
-      } finally { 
-        pollEnhancedVocab._busy = false 
-      }
-    }
-    // Poll less frequently since ChatGPT analysis is more expensive
-    setInterval(pollEnhancedVocab, 5000); pollEnhancedVocab()
 
     // Poll waveform
     const pollWave = async () => {
@@ -487,7 +414,26 @@
     }
   }
 
-  // Enhanced hover handlers for vocabulary items
+  // Hover handlers for vocabulary items
+  function highlightContext(ctx?: string) {
+    if (!ctx) return
+    const container = transcriptEl?.querySelector('.content')
+    if (!container) return
+    if (highlightedEl) highlightedEl.classList.remove('vocab-highlight')
+    highlightedEl = null
+    const nodes = Array.from(container.querySelectorAll('p, li')) as HTMLElement[]
+    for (const n of nodes) {
+      if (n.textContent && n.textContent.includes(ctx)) {
+        n.classList.add('vocab-highlight')
+        highlightedEl = n
+        break
+      }
+    }
+  }
+  function clearHighlight() {
+    if (highlightedEl) highlightedEl.classList.remove('vocab-highlight')
+    highlightedEl = null
+  }
   function onVocabEnter(e: MouseEvent, v: Vocab) {
     const el = e.currentTarget as HTMLElement
     if (!el) return
@@ -496,6 +442,7 @@
     hoverTop = Math.max(8, r.top)
     hoverLeft = r.right + 10
     hoverVisible = true
+    highlightContext(v.ctx)
   }
   function onVocabMove(e: MouseEvent) {
     if (!hoverVisible) return
@@ -505,9 +452,10 @@
     const rightPref = e.clientX + 12 + bubbleWidth
     if (rightPref < vw - 8) { hoverLeft = e.clientX + 12 } else { hoverLeft = Math.max(8, e.clientX - 12 - bubbleWidth) }
   }
-  function onVocabLeave() { 
+  function onVocabLeave() {
     hoverVisible = false
     hoverVocab = null
+    clearHighlight()
   }
 
   function buildSuggestions(text: string, exclude: Set<string>): Suggest[] {
@@ -534,90 +482,19 @@
 </script>
 
 <div class="container">
-  <SidebarPanel side="left" title={enhancedVocabEnabled ? "Enhanced Vocab" : "Vocabs"} count={enhancedVocabEnabled ? enhancedVocabTimeline.length : vocabsUniq.length} open={sidebarOpen} widthOpen={SIDEBAR_W_OPEN} widthClosed={SIDEBAR_W_CLOSED} fluid={true} on:toggle={() => sidebarOpen = !sidebarOpen}>
-    <div class="vocabs-list" on:scroll={() => { hoverVisible = false }}>
-      {#if enhancedVocabEnabled && enhancedVocabTimeline.length > 0}
-        <!-- Enhanced ChatGPT vocabulary -->
-        {#each enhancedVocabTimeline as v}
-          <div class="vocab-item enhanced"
-               on:mouseenter={(e) => onVocabEnter(e, {
-                 ja: v.surface, 
-                 read: v.reading_hiragana,
-                 en: v.meaning_en,
-                 word_type: v.word_type,
-                 kanji_breakdown: v.kanji_breakdown,
-                 usage_examples: v.examples,
-                 nuance: v.usage_notes,
-                 enhanced: true
-               })}
-               on:mousemove={(e) => onVocabMove(e)}
-               on:mouseleave={onVocabLeave}>
-            <span class="vocab-ja">{v.surface}</span>
-            <span class="vocab-read">{v.reading_hiragana}</span>
-            <span class="vocab-en">{v.meaning_en}</span>
-            {#if v.word_type}<span class="vocab-type">[{v.word_type}]</span>{/if}
-            {#if v.count > 1}<span class="vocab-count">×{v.count}</span>{/if}
-            <span class="enhanced-badge">✨</span>
-          </div>
-        {/each}
-        
-        <!-- Kanji section -->
-        {#if kanjiData.length > 0}
-          <div class="vocab-section-header">漢字 (Kanji)</div>
-          {#each kanjiData as kanji}
-            <div class="vocab-item kanji-item"
-                 on:mouseenter={(e) => onVocabEnter(e, {
-                   ja: kanji.kanji,
-                   read: kanji.readings_kun.concat(kanji.readings_on).join('・'),
-                   en: kanji.meaning_en,
-                   word_type: 'kanji',
-                   enhanced: true
-                 })}
-                 on:mousemove={(e) => onVocabMove(e)}
-                 on:mouseleave={onVocabLeave}>
-              <span class="vocab-ja">{kanji.kanji}</span>
-              <span class="vocab-read">{kanji.readings_kun.concat(kanji.readings_on).slice(0,2).join('・')}</span>
-              <span class="vocab-en">{kanji.meaning_en}</span>
-              {#if kanji.stroke_count}<span class="stroke-count">{kanji.stroke_count}画</span>{/if}
-            </div>
-          {/each}
-        {/if}
-        
-        <!-- Katakana section -->
-        {#if katakanaData.length > 0}
-          <div class="vocab-section-header">カタカナ (Katakana)</div>
-          {#each katakanaData as kata}
-            <div class="vocab-item katakana-item"
-                 on:mouseenter={(e) => onVocabEnter(e, {
-                   ja: kata.surface,
-                   read: kata.reading_hiragana,
-                   en: kata.meaning_en,
-                   word_type: 'katakana',
-                   enhanced: true
-                 })}
-                 on:mousemove={(e) => onVocabMove(e)}
-                 on:mouseleave={onVocabLeave}>
-              <span class="vocab-ja">{kata.surface}</span>
-              <span class="vocab-read">{kata.reading_hiragana}</span>
-              <span class="vocab-en">{kata.meaning_en}</span>
-              {#if kata.origin}<span class="origin-tag">{kata.origin}</span>{/if}
-            </div>
-          {/each}
-        {/if}
-      {:else}
-        <!-- Fallback to original vocabulary -->
-        {#each vocabsTimeline as v}
-          <div class="vocab-item"
-               on:mouseenter={(e) => onVocabEnter(e, v)}
-               on:mousemove={(e) => onVocabMove(e)}
-               on:mouseleave={onVocabLeave}>
-            <span class="vocab-ja">{v.ja}</span>
-            {#if v.read}<span class="vocab-read">{v.read}</span>{/if}
-            <span class="vocab-en">{v.en}</span>
-            {#if v.count > 1}<span class="vocab-count">×{v.count}</span>{/if}
-          </div>
-        {/each}
-      {/if}
+  <SidebarPanel side="left" title="Vocabs" count={vocabsUniq.length} open={sidebarOpen} widthOpen={SIDEBAR_W_OPEN} widthClosed={SIDEBAR_W_CLOSED} fluid={true} on:toggle={() => sidebarOpen = !sidebarOpen}>
+    <div class="vocabs-list" on:scroll={() => { hoverVisible = false; clearHighlight() }}>
+      {#each vocabsTimeline as v}
+        <div class="vocab-item"
+             on:mouseenter={(e) => onVocabEnter(e, v)}
+             on:mousemove={(e) => onVocabMove(e)}
+             on:mouseleave={onVocabLeave}>
+          <span class="vocab-ja">{v.ja}</span>
+          {#if v.read}<span class="vocab-read">{v.read}</span>{/if}
+          <span class="vocab-en">{v.en}</span>
+          {#if v.count > 1}<span class="vocab-count">×{v.count}</span>{/if}
+        </div>
+      {/each}
     </div>
   </SidebarPanel>
 
@@ -683,63 +560,19 @@
 </div>
 
 {#if hoverVisible && hoverVocab}
-  <div class="enhanced-hover-bubble" style={`top:${hoverTop}px; left:${hoverLeft}px;`}>
+  <div class="hover-bubble" style={`top:${hoverTop}px; left:${hoverLeft}px;`}>
     <div class="hover-header">
       <span class="hover-ja">{hoverVocab.ja}</span>
       {#if hoverVocab.read}
         <span class="hover-reading">({hoverVocab.read})</span>
       {/if}
-      {#if hoverVocab.enhanced}
-        <span class="enhanced-badge">✨</span>
-      {/if}
     </div>
-    
-    {#if hoverVocab.word_type}
-      <div class="hover-type">{hoverVocab.word_type}</div>
-    {/if}
-    
     <div class="hover-meanings">
-      {#if hoverVocab.meanings && hoverVocab.meanings.length > 0}
-        {#each hoverVocab.meanings as meaning}
-          <div class="meaning-item">• {meaning}</div>
-        {/each}
-      {:else if hoverVocab.en}
+      {#if hoverVocab.en}
         <div class="meaning-item">• {hoverVocab.en}</div>
       {/if}
     </div>
-    
-    {#if hoverVocab.kanji_breakdown && hoverVocab.kanji_breakdown.length > 0}
-      <div class="hover-section">
-        <div class="section-title">Kanji breakdown:</div>
-        <div class="kanji-breakdown">
-          {#each hoverVocab.kanji_breakdown as kb}
-            <div class="kanji-item">
-              <span class="kanji">{kb.kanji}</span>
-              <span class="kanji-reading">({kb.reading})</span>
-              <span class="kanji-meaning">= {kb.meaning}</span>
-            </div>
-          {/each}
-        </div>
-      </div>
-    {/if}
-    
-    {#if hoverVocab.usage_examples && hoverVocab.usage_examples.length > 0}
-      <div class="hover-section">
-        <div class="section-title">Examples:</div>
-        {#each hoverVocab.usage_examples.slice(0, 2) as example}
-          <div class="example-item">{example}</div>
-        {/each}
-      </div>
-    {/if}
-    
-    {#if hoverVocab.nuance}
-      <div class="hover-section">
-        <div class="section-title">Usage notes:</div>
-        <div class="nuance-text">{hoverVocab.nuance}</div>
-      </div>
-    {/if}
-    
-    {#if hoverVocab.ctx && !hoverVocab.enhanced}
+    {#if hoverVocab.ctx}
       <div class="hover-section">
         <div class="section-title">Context:</div>
         <div class="context-text">{hoverVocab.ctx}</div>
