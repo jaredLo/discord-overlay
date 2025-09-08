@@ -135,11 +135,14 @@ def _fallback_basic_vocab(text: str) -> Dict[str, List[Dict]]:
     try:
         for token in _fb_tagger(text):
             pos = getattr(token.feature, "pos1", "")
-            if pos not in ("名詞", "動詞", "形容詞"):
+            if pos not in ("名詞", "動詞", "形容詞", "接続詞", "助詞"):
+                continue
+            surf = token.surface
+            if len(surf) == 1 and re.match(r"[\u4E00-\u9FFF]", surf):
                 continue
             reading = getattr(token.feature, "pron", None) or getattr(token.feature, "kana", None) or ""
             entries.append({
-                "surface": token.surface,
+                "surface": surf,
                 "reading_hiragana": _to_hira_fb(reading),
                 "meaning_en": "",
             })
@@ -174,7 +177,9 @@ def _chatgpt_vocab_request(japanese_text: str) -> Optional[Dict]:
     system_prompt = (
         "You are a Japanese vocabulary extractor. "
         "Given Japanese text, return only a JSON object with a 'vocabulary' array. "
-        "Each item must have 'surface', 'reading_hiragana', and 'meaning_en'."
+        "Each item must have 'surface', 'reading_hiragana', and 'meaning_en'. "
+        "Return complete vocabulary words (nouns, verbs, adjectives, and conjunctions). "
+        "Do not list individual kanji characters or stray kana fragments unless they are standalone words."
     )
 
     user_content = f"Extract vocabulary from this Japanese text:\n\n{japanese_text}"
@@ -373,6 +378,8 @@ def analyze_transcript_vocab(transcript_text: str) -> Dict[str, List[Dict]]:
         for vocab in result.get("vocabulary", []):
             surf = vocab.get("surface")
             if not surf:
+                continue
+            if len(surf) == 1 and re.match(r"[\u4E00-\u9FFF]", surf):
                 continue
             _vocab_counts[surf] = _vocab_counts.get(surf, 0) + 1
             if surf not in _aggregated_vocab:
