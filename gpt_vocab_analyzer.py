@@ -304,6 +304,12 @@ def extract_japanese_from_transcript(transcript_text: str) -> List[str]:
 _analyzer = None
 _analyzed_hashes: Set[str] = set()
 
+# Aggregated results across processed segments
+_vocab_counts: Dict[str, int] = {}
+_aggregated_vocab: Dict[str, Dict] = {}
+_aggregated_kanji: Dict[str, Dict] = {}
+_aggregated_katakana: Dict[str, Dict] = {}
+
 def get_analyzer() -> VocabularyAnalyzer:
     """Get the global vocabulary analyzer instance."""
     global _analyzer
@@ -320,54 +326,65 @@ def analyze_transcript_vocab(transcript_text: str) -> Dict[str, List[Dict]]:
         transcript_text: Raw transcript text containing Japanese
 
     Returns:
-        Combined vocabulary analysis for the current rolling window
+        Aggregated vocabulary analysis across all processed segments. Results
+        accumulate over time and include usage counts for each vocabulary word.
     """
     if not USE_GPT_VOCAB_ANALYSIS:
-        return {"vocabulary": [], "kanji_only": [], "katakana_words": []}
+        return {"vocabulary": [], "kanji_only": [], "katakana_words": [], "vocab_counts": {}}
 
     window_text = transcript_text[-GPT_VOCAB_WINDOW:] if GPT_VOCAB_WINDOW > 0 else transcript_text
     japanese_segments = extract_japanese_from_transcript(window_text)
     if not japanese_segments:
-        return {"vocabulary": [], "kanji_only": [], "katakana_words": []}
+        return {
+            "vocabulary": list(_aggregated_vocab.values()),
+            "kanji_only": list(_aggregated_kanji.values()),
+            "katakana_words": list(_aggregated_katakana.values()),
+            "vocab_counts": dict(_vocab_counts),
+        }
 
     analyzer = get_analyzer()
-    results = {"vocabulary": [], "kanji_only": [], "katakana_words": []}
-    new_segments: List[str] = []
-    new_hashes: List[str] = []
 
     for seg in japanese_segments:
         seg_hash = _sha1(seg)
-        cached = _get_cached_analysis(seg)
-        if cached:
-            results["vocabulary"].extend(cached.get("vocabulary", []))
-            results["kanji_only"].extend(cached.get("kanji_only", []))
-            results["katakana_words"].extend(cached.get("katakana_words", []))
-            _analyzed_hashes.add(seg_hash)
-        elif seg_hash not in _analyzed_hashes:
-            new_segments.append(seg)
-            new_hashes.append(seg_hash)
+        if seg_hash in _analyzed_hashes:
+            continue
 
-    if new_segments:
-        batch_results = analyzer.analyze_batch(new_segments)
-        for seg_hash, seg_result in zip(new_hashes, batch_results):
-            if seg_result:
-                results["vocabulary"].extend(seg_result.get("vocabulary", []))
-                results["kanji_only"].extend(seg_result.get("kanji_only", []))
-                results["katakana_words"].extend(seg_result.get("katakana_words", []))
-                _analyzed_hashes.add(seg_hash)
+        result = _get_cached_analysis(seg)
+        if result is None:
+            result = analyzer.analyze_text(seg)
+        if not result:
+            continue
 
-    return results
+        # Aggregate vocabulary entries and counts
+        for vocab in result.get("vocabulary", []):
+            surf = vocab.get("surface")
+            if not surf:
+                continue
+            _vocab_counts[surf] = _vocab_counts.get(surf, 0) + 1
+            if surf not in _aggregated_vocab:
+                _aggregated_vocab[surf] = vocab
+
+        for kanji in result.get("kanji_only", []):
+            kan = kanji.get("kanji")
+            if kan and kan not in _aggregated_kanji:
+                _aggregated_kanji[kan] = kanji
+
+        for kata in result.get("katakana_words", []):
+            surf = kata.get("surface")
+            if surf and surf not in _aggregated_katakana:
+                _aggregated_katakana[surf] = kata
+
+        _analyzed_hashes.add(seg_hash)
+
+    return {
+        "vocabulary": list(_aggregated_vocab.values()),
+        "kanji_only": list(_aggregated_kanji.values()),
+        "katakana_words": list(_aggregated_katakana.values()),
+        "vocab_counts": dict(_vocab_counts),
+    }
 
 if __name__ == "__main__":
-    # Test the analyzer
-    test_text = """
-    聞いてないよ!分かったんじゃんかい! 負け!
-    え、どうなったの?
-    変な ええ
-    やられた、騙された えー、1200
-    200円で買います
-    """
-    
+    sample = "聞いてないよ!分かったんじゃんかい! 負け!"
     print("Testing ChatGPT vocabulary analyzer...")
-    result = analyze_transcript_vocab(test_text)
+    result = analyze_transcript_vocab(sample)
     print(json.dumps(result, indent=2, ensure_ascii=False))

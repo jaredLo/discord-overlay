@@ -497,7 +497,8 @@ def get_enhanced_vocab():
             "enabled": True,
             "vocabulary": analysis.get("vocabulary", []),
             "kanji_only": analysis.get("kanji_only", []),
-            "katakana_words": analysis.get("katakana_words", [])
+            "katakana_words": analysis.get("katakana_words", []),
+            "vocab_counts": analysis.get("vocab_counts", {}),
         })
         
     except Exception as e:
