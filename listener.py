@@ -1337,33 +1337,20 @@ def main():
             if not CAPTURE_ALL and len(text) < 3:
                 continue
             out_lines: List[str] = []
-            if not re.search(r"[ぁ-んァ-ヴ一-龯]", text):
-                # Non-Japanese: use GPT EN as line 2 by sending as-is; line 1 mirrors
-                payload_text = _sanitize_for_gpt(text) or text
-                # Rate limit with blocking wait to avoid fallback output
-                with gpt_lock:
-                    now2 = time.time()
-                    elapsed_ms = (now2 - GPT_LAST_TS["t"]) * 1000.0
-                    wait_ms = GPT_RATE_LIMIT_MS - elapsed_ms
-                    if wait_ms > 0:
-                        _perf(f"gpt wait {int(wait_ms)}ms (rate limit)")
-                        time.sleep(wait_ms/1000.0)
-                    GPT_LAST_TS["t"] = time.time()
-                j = _gpt_request(payload_text)
-                if j:
-                    try:
-                        out_lines = _render_four_lines(j)
-                        if SHOW_DETAILS_LINE:
-                            try:
-                                update_suggestions(j.get("suggestions") or [])
-                            except Exception:
-                                pass
-                    except Exception:
-                        out_lines = []
+            # If GPT formatter disabled, always emit JP + placeholder EN + local vocab
+            if not USE_GPT_FORMATTER:
+                try:
+                    jp_html = html.escape(text)
+                    en_html = ""
+                    vocab_line = _build_vocab_line_from_jp(jp_html)
+                    out_lines = [jp_html, en_html, vocab_line]
+                except Exception:
+                    out_lines = []
             else:
-                # Japanese present: prefer GPT output; fallback to raw JP if skipped by repetition guard
-                payload_text = _sanitize_for_gpt(text)
-                if payload_text:
+                if not re.search(r"[ぁ-んァ-ヴ一-龯]", text):
+                    # Non-Japanese: use GPT EN as line 2 by sending as-is; line 1 mirrors
+                    payload_text = _sanitize_for_gpt(text) or text
+                    # Rate limit with blocking wait to avoid fallback output
                     with gpt_lock:
                         now2 = time.time()
                         elapsed_ms = (now2 - GPT_LAST_TS["t"]) * 1000.0
@@ -1375,29 +1362,52 @@ def main():
                     j = _gpt_request(payload_text)
                     if j:
                         try:
-                            t0 = time.time()
                             out_lines = _render_four_lines(j)
-                            _perf(f"render_four_lines {int((time.time()-t0)*1000)}ms")
                             if SHOW_DETAILS_LINE:
                                 try:
-                                    t1 = time.time()
                                     update_suggestions(j.get("suggestions") or [])
-                                    _perf(f"update_suggestions {int((time.time()-t1)*1000)}ms")
                                 except Exception:
                                     pass
                         except Exception:
                             out_lines = []
                 else:
-                    # Fallback minimal lines so UI is not blank, include local vocab line
-                    try:
-                        t2 = time.time()
-                        jp_html = html.escape(text)
-                        en_html = ""
-                        vocab_line = _build_vocab_line_from_jp(jp_html)
-                        out_lines = [jp_html, en_html, vocab_line]
-                        _perf(f"fallback_local_vocab {int((time.time()-t2)*1000)}ms")
-                    except Exception:
-                        out_lines = []
+                    # Japanese present: prefer GPT output; fallback to raw JP if skipped by repetition guard
+                    payload_text = _sanitize_for_gpt(text)
+                    if payload_text:
+                        with gpt_lock:
+                            now2 = time.time()
+                            elapsed_ms = (now2 - GPT_LAST_TS["t"]) * 1000.0
+                            wait_ms = GPT_RATE_LIMIT_MS - elapsed_ms
+                            if wait_ms > 0:
+                                _perf(f"gpt wait {int(wait_ms)}ms (rate limit)")
+                                time.sleep(wait_ms/1000.0)
+                            GPT_LAST_TS["t"] = time.time()
+                        j = _gpt_request(payload_text)
+                        if j:
+                            try:
+                                t0 = time.time()
+                                out_lines = _render_four_lines(j)
+                                _perf(f"render_four_lines {int((time.time()-t0)*1000)}ms")
+                                if SHOW_DETAILS_LINE:
+                                    try:
+                                        t1 = time.time()
+                                        update_suggestions(j.get("suggestions") or [])
+                                        _perf(f"update_suggestions {int((time.time()-t1)*1000)}ms")
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                out_lines = []
+                    else:
+                        # Fallback minimal lines so UI is not blank, include local vocab line
+                        try:
+                            t2 = time.time()
+                            jp_html = html.escape(text)
+                            en_html = ""
+                            vocab_line = _build_vocab_line_from_jp(jp_html)
+                            out_lines = [jp_html, en_html, vocab_line]
+                            _perf(f"fallback_local_vocab {int((time.time()-t2)*1000)}ms")
+                        except Exception:
+                            out_lines = []
             if not out_lines:
                 # If GPT failed or returned nothing, skip this utterance entirely
                 continue

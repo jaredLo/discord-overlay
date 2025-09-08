@@ -196,6 +196,7 @@
         if (items.length) {
           asrRows = items
           // Update Raw transcription from newest ASR entries
+          let appended = 0
           for (const it of items) {
             const key = String(it.id || it.ts)
             if (!key || rawSeenIds[key]) continue
@@ -203,7 +204,9 @@
             if (!text || !isJapanese(text)) { rawSeenIds[key] = true; continue }
             rawSeenIds[key] = true
             rawTimeline = [...rawTimeline, { id: key, text }].slice(-300)
+            appended++
           }
+          if (appended > 0) { requestAnimationFrame(maybeAutoscroll) }
         }
       } catch {}
       finally { pollAsr._busy = false }
@@ -468,7 +471,9 @@
   <div class="main">
     <div class="panel transcript" bind:this={transcriptEl} on:scroll={updateScrollState} on:mouseup={updateScrollState}>
       <div class="content" on:dblclick={scrollToBottom}>
-        {@html trustHtml(transcriptHtml)}
+        {#each rawTimeline as r}
+          <p>{r.text}</p>
+        {/each}
       </div>
     </div>
 
@@ -502,21 +507,7 @@
     </div>
   {/if}
 
-  {#if rawEnabled}
-    <div class="sidebar sidebar-right" style={`width:${rawOpen ? RAW_W_OPEN : RAW_W_CLOSED}px`}>
-      <div class="sidebar-toggle" title={rawOpen ? 'Collapse' : 'Expand'} on:click={() => rawOpen = !rawOpen}>
-        {#if rawOpen}▶{:else}◀{/if}
-      </div>
-      <div class="sidebar-content" style={`opacity:${rawOpen ? 1 : 0}; pointer-events:${rawOpen ? 'auto' : 'none'}; transition: opacity 120ms ease;`}>
-        <div class="vocabs-header"><div class="sidebar-title">Raw transcription</div><div><small style="margin-right:8px;">{rawTimeline.length}</small></div></div>
-        <div class="vocabs-list">
-          {#each rawTimeline as r}
-            <div class="vocab-item">{r.text}</div>
-          {/each}
-        </div>
-      </div>
-    </div>
-  {/if}
+  
 
   {#if asrDebugEnabled}
   <div class="sidebar sidebar-debug" style={`width:${debugOpen ? DEBUG_W_OPEN : DEBUG_W_CLOSED}px`}>

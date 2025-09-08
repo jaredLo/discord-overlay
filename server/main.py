@@ -306,6 +306,9 @@ def _extract_suggestions(text: str, exclude: set, max_items=30) -> List[Dict[str
 @app.get("/api/overlay/suggestions")
 def get_suggestions():
     try:
+        # Allow disabling suggestions entirely via env
+        if os.getenv("SUGGESTIONS_ENABLED", "true").lower() not in {"1","true","yes","y"}:
+            return JSONResponse({"items": []})
         text = _read_text(TRANSCRIPT_FILE)
         # extract exclude set from existing Vocab: lines
         exclude = set()
