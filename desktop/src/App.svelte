@@ -10,6 +10,7 @@
 
   let transcriptHtml = ''
   let transcriptRaw = ''
+  let asrBackend = ''
   let waveData: number[] = []
   let transcriptEl: HTMLDivElement | null = null
   let followTail = true
@@ -20,17 +21,29 @@
   let sidebarOpen = true
   const SIDEBAR_W_OPEN = 260
   const SIDEBAR_W_CLOSED = 26
-  type Vocab = { ja: string, read?: string, en: string, ctx?: string }
+  type Vocab = { 
+    ja: string, 
+    read?: string, 
+    en: string, 
+    ctx?: string,
+    meanings?: string[],
+    kanji_breakdown?: Array<{kanji: string, reading: string, meaning: string}>,
+    word_type?: string,
+    nuance?: string,
+    usage_examples?: string[],
+    enhanced?: boolean
+  }
   let vocabs: Vocab[] = []
   let vocabsUniq: Array<Vocab & { count: number }> = []
   let vocabsTimeline: Array<Vocab & { count: number }> = []
-  // Hover bubble state
+  // Enhanced hover bubble state
   let hoverVisible = false
-  let hoverText = ''
+  let hoverVocab: Vocab | null = null
   let hoverTop = 0
   let hoverLeft = 0
   import { appWindow } from '@tauri-apps/api/window'
   import { invoke } from '@tauri-apps/api/tauri'
+  import SidebarPanel from './lib/components/SidebarPanel.svelte'
   const sessionStarted = new Date()
   let autosaveTimer: any = null
   let closeUnlisten: (() => void) | null = null
@@ -166,7 +179,7 @@
     pollTranscript()
 
     // Read health once (no gating; suggestions default on)
-    try { await client.health() } catch {}
+    try { const h = await client.health(); asrBackend = (h?.asr_backend || '').toLowerCase() } catch {}
 
     // Suggestions poll (append-only timeline)
     const pollSugg: any = async () => {
@@ -401,13 +414,12 @@
     }
   }
 
-  // Hover handlers (avoid TS casts in template)
+  // Enhanced hover handlers for vocabulary items
   function onVocabEnter(e: MouseEvent, v: Vocab) {
-    if (!v.ctx) return
     const el = e.currentTarget as HTMLElement
     if (!el) return
     const r = el.getBoundingClientRect()
-    hoverText = v.ctx
+    hoverVocab = v
     hoverTop = Math.max(8, r.top)
     hoverLeft = r.right + 10
     hoverVisible = true
@@ -420,7 +432,10 @@
     const rightPref = e.clientX + 12 + bubbleWidth
     if (rightPref < vw - 8) { hoverLeft = e.clientX + 12 } else { hoverLeft = Math.max(8, e.clientX - 12 - bubbleWidth) }
   }
-  function onVocabLeave() { hoverVisible = false }
+  function onVocabLeave() { 
+    hoverVisible = false
+    hoverVocab = null
+  }
 
   function buildSuggestions(text: string, exclude: Set<string>): Suggest[] {
     const lines = text.split(/\r?\n/).slice(-60)
@@ -446,34 +461,32 @@
 </script>
 
 <div class="container">
-  <div class="sidebar sidebar-left" style={`width:${sidebarOpen ? SIDEBAR_W_OPEN : SIDEBAR_W_CLOSED}px`}>
-    <div class="sidebar-toggle" title={sidebarOpen ? 'Collapse' : 'Expand'} on:click={() => sidebarOpen = !sidebarOpen}>
-      {#if sidebarOpen}◀{:else}▶{/if}
+  <SidebarPanel side="left" title="Vocabs" count={vocabsUniq.length} open={sidebarOpen} widthOpen={SIDEBAR_W_OPEN} widthClosed={SIDEBAR_W_CLOSED} fluid={true} on:toggle={() => sidebarOpen = !sidebarOpen}>
+    <div class="vocabs-list" on:scroll={() => { hoverVisible = false }}>
+      {#each vocabsTimeline as v}
+        <div class="vocab-item"
+             on:mouseenter={(e) => onVocabEnter(e, v)}
+             on:mousemove={(e) => onVocabMove(e)}
+             on:mouseleave={onVocabLeave}>
+          <span class="vocab-ja">{v.ja}</span>
+          {#if v.read}<span class="vocab-read">{v.read}</span>{/if}
+          <span class="vocab-en">{v.en}</span>
+          {#if v.count > 1}<span class="vocab-count">×{v.count}</span>{/if}
+        </div>
+      {/each}
     </div>
-    <div class="sidebar-content" style={`opacity:${sidebarOpen ? 1 : 0}; pointer-events:${sidebarOpen ? 'auto' : 'none'}; transition: opacity 120ms ease;`}>
-      <div class="vocabs-header"><div class="sidebar-title">Vocabs</div><div><small style="margin-right:8px;">{vocabsUniq.length}</small></div></div>
-      <div class="vocabs-list" on:scroll={() => { hoverVisible = false }}>
-        {#each vocabsTimeline as v}
-          <div class="vocab-item"
-               on:mouseenter={(e) => onVocabEnter(e, v)}
-               on:mousemove={(e) => onVocabMove(e)}
-               on:mouseleave={onVocabLeave}>
-            <span class="vocab-ja">{v.ja}</span>
-            {#if v.read}<span class="vocab-read">{v.read}</span>{/if}
-            <span class="vocab-en">{v.en}</span>
-            {#if v.count > 1}<span class="vocab-count">×{v.count}</span>{/if}
-          </div>
-        {/each}
-      </div>
-    </div>
-  </div>
+  </SidebarPanel>
 
   <div class="main">
     <div class="panel transcript" bind:this={transcriptEl} on:scroll={updateScrollState} on:mouseup={updateScrollState}>
       <div class="content" on:dblclick={scrollToBottom}>
-        {#each rawTimeline as r}
-          <p>{r.text}</p>
-        {/each}
+        {#if asrBackend === 'openai'}
+          {@html trustHtml(transcriptHtml)}
+        {:else}
+          {#each rawTimeline as r}
+            <p>{r.text}</p>
+          {/each}
+        {/if}
       </div>
     </div>
 
@@ -487,56 +500,106 @@
   </div>
 
   {#if detailsEnabled}
-    <div class="sidebar sidebar-right" style={`width:${rightOpen ? RIGHT_W_OPEN : RIGHT_W_CLOSED}px`}>
-      <div class="sidebar-toggle" title={rightOpen ? 'Collapse' : 'Expand'} on:click={() => rightOpen = !rightOpen}>
-        {#if rightOpen}▶{:else}◀{/if}
+    <SidebarPanel side="right" title="Suggestions" count={suggTimeline.length} open={rightOpen} widthOpen={RIGHT_W_OPEN} widthClosed={RIGHT_W_CLOSED} fluid={true} on:toggle={() => rightOpen = !rightOpen}>
+      <div class="vocabs-list">
+        {#each suggTimeline.filter(s => !vocabsUniq.find(v => v.ja === s.ja)) as s}
+          <div class="vocab-item">
+            <span class="vocab-ja">{s.ja}</span>
+            {#if s.read}<span class="vocab-read">{s.read}</span>{/if}
+            {#if s.en}<span class="vocab-en">{s.en}</span>{/if}
+            {#if s.count>1}<span class="vocab-count">×{s.count}</span>{/if}
+          </div>
+        {/each}
       </div>
-      <div class="sidebar-content" style={`opacity:${rightOpen ? 1 : 0}; pointer-events:${rightOpen ? 'auto' : 'none'}; transition: opacity 120ms ease;`}>
-        <div class="vocabs-header"><div class="sidebar-title">Suggestions</div><div><small style="margin-right:8px;">{suggTimeline.length}</small></div></div>
-        <div class="vocabs-list">
-          {#each suggTimeline.filter(s => !vocabsUniq.find(v => v.ja === s.ja)) as s}
-            <div class="vocab-item">
-              <span class="vocab-ja">{s.ja}</span>
-              {#if s.read}<span class="vocab-read">{s.read}</span>{/if}
-              {#if s.en}<span class="vocab-en">{s.en}</span>{/if}
-              {#if s.count>1}<span class="vocab-count">×{s.count}</span>{/if}
-            </div>
-          {/each}
-        </div>
-      </div>
-    </div>
+    </SidebarPanel>
   {/if}
 
   
 
   {#if asrDebugEnabled}
-  <div class="sidebar sidebar-debug" style={`width:${debugOpen ? DEBUG_W_OPEN : DEBUG_W_CLOSED}px`}>
-    <div class="sidebar-toggle" title={debugOpen ? 'Collapse' : 'Expand'} on:click={() => debugOpen = !debugOpen}>
-      {#if debugOpen}▶{:else}◀{/if}
-    </div>
-    <div class="sidebar-content" style={`opacity:${debugOpen ? 1 : 0}; pointer-events:${debugOpen ? 'auto' : 'none'}; transition: opacity 120ms ease;`}>
-      <div class="vocabs-header"><div class="sidebar-title">ASR Debug</div><div><small style="margin-right:8px;">{asrRows.length}</small></div></div>
-      <div class="vocabs-list">
-        {#each asrRows as r}
-          <div class="pair">
-            <div class="asr-col">
-              <div class="asr-title">OpenAI</div>
-              <div class="asr-card">{r.openai?.text || ''}</div>
-              <div class="asr-meta">{r.openai?.ms ? `${r.openai.ms} ms` : ''}</div>
-            </div>
-            <div class="asr-col">
-              <div class="asr-title">Home</div>
-              <div class="asr-card">{r.remote?.text || ''}</div>
-              <div class="asr-meta">{r.remote?.ms ? `${r.remote.ms} ms` : ''}</div>
-            </div>
+  <SidebarPanel side="debug" title="ASR Debug" count={asrRows.length} open={debugOpen} widthOpen={DEBUG_W_OPEN} widthClosed={DEBUG_W_CLOSED} on:toggle={() => debugOpen = !debugOpen}>
+    <div class="vocabs-list">
+      {#each asrRows as r}
+        <div class="pair">
+          <div class="asr-col">
+            <div class="asr-title">OpenAI</div>
+            <div class="asr-card">{r.openai?.text || ''}</div>
+            <div class="asr-meta">{r.openai?.ms ? `${r.openai.ms} ms` : ''}</div>
           </div>
-        {/each}
-      </div>
+          <div class="asr-col">
+            <div class="asr-title">Home</div>
+            <div class="asr-card">{r.remote?.text || ''}</div>
+            <div class="asr-meta">{r.remote?.ms ? `${r.remote.ms} ms` : ''}</div>
+          </div>
+        </div>
+      {/each}
     </div>
-  </div>
+  </SidebarPanel>
   {/if}
 </div>
 
-{#if hoverVisible}
-  <div class="hover-bubble" style={`top:${hoverTop}px; left:${hoverLeft}px;`}>{hoverText}</div>
+{#if hoverVisible && hoverVocab}
+  <div class="enhanced-hover-bubble" style={`top:${hoverTop}px; left:${hoverLeft}px;`}>
+    <div class="hover-header">
+      <span class="hover-ja">{hoverVocab.ja}</span>
+      {#if hoverVocab.read}
+        <span class="hover-reading">({hoverVocab.read})</span>
+      {/if}
+      {#if hoverVocab.enhanced}
+        <span class="enhanced-badge">✨</span>
+      {/if}
+    </div>
+    
+    {#if hoverVocab.word_type}
+      <div class="hover-type">{hoverVocab.word_type}</div>
+    {/if}
+    
+    <div class="hover-meanings">
+      {#if hoverVocab.meanings && hoverVocab.meanings.length > 0}
+        {#each hoverVocab.meanings as meaning}
+          <div class="meaning-item">• {meaning}</div>
+        {/each}
+      {:else if hoverVocab.en}
+        <div class="meaning-item">• {hoverVocab.en}</div>
+      {/if}
+    </div>
+    
+    {#if hoverVocab.kanji_breakdown && hoverVocab.kanji_breakdown.length > 0}
+      <div class="hover-section">
+        <div class="section-title">Kanji breakdown:</div>
+        <div class="kanji-breakdown">
+          {#each hoverVocab.kanji_breakdown as kb}
+            <div class="kanji-item">
+              <span class="kanji">{kb.kanji}</span>
+              <span class="kanji-reading">({kb.reading})</span>
+              <span class="kanji-meaning">= {kb.meaning}</span>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
+    
+    {#if hoverVocab.usage_examples && hoverVocab.usage_examples.length > 0}
+      <div class="hover-section">
+        <div class="section-title">Examples:</div>
+        {#each hoverVocab.usage_examples.slice(0, 2) as example}
+          <div class="example-item">{example}</div>
+        {/each}
+      </div>
+    {/if}
+    
+    {#if hoverVocab.nuance}
+      <div class="hover-section">
+        <div class="section-title">Usage notes:</div>
+        <div class="nuance-text">{hoverVocab.nuance}</div>
+      </div>
+    {/if}
+    
+    {#if hoverVocab.ctx && !hoverVocab.enhanced}
+      <div class="hover-section">
+        <div class="section-title">Context:</div>
+        <div class="context-text">{hoverVocab.ctx}</div>
+      </div>
+    {/if}
+  </div>
 {/if}

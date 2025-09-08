@@ -136,6 +136,7 @@ def health():
         "waveform_mtime": lw,
         "show_details": show_details,
         "show_asr_debug": show_asr_debug,
+        "asr_backend": (os.getenv("ASR_BACKEND", "").lower()),
     }
 
 
@@ -200,6 +201,10 @@ def _jisho_best_gloss(word: str) -> str:
     except Exception:
         return ''
     return ''
+
+def best_gloss(word: str) -> str:
+    """Get the best English gloss for a Japanese word"""
+    return _jisho_best_gloss(word)
 
 def _internal_suggestions(bases: List[str], max_items=30) -> List[Dict[str,str]]:
     """Optional hook to an internal JP library/service.
@@ -303,6 +308,103 @@ def _extract_suggestions(text: str, exclude: set, max_items=30) -> List[Dict[str
             out.append({ 'ja': w, 'read': rd, 'en': en })
     return out
 
+def _extract_from_raw(text: str, exclude: set, max_items=30) -> List[Dict[str,str]]:
+    """Build suggestions directly from recent raw transcript lines.
+    Priority order:
+      1) Vocab-like tokens (名詞/動詞/形容詞)
+      2) Tokens containing Kanji
+      3) Katakana tokens
+    For each item, include ja, reading_kana in hira, and en gloss via Jisho if available.
+    """
+    try:
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        # Consider only the last ~80 content lines
+        lines = lines[-120:]
+        # Skip meta lines
+        lines = [ln for ln in lines if not (ln.startswith('Vocab:') or ln.startswith('📚'))]
+        seen: set = set()
+        vocab: List[str] = []
+        kanji: List[str] = []
+        kata: List[str] = []
+        for line in lines:
+            if _tagger is not None:
+                try:
+                    toks = list(_tagger(line))
+                except Exception:
+                    toks = []
+                for m in toks:
+                    surf = m.surface.strip()
+                    if not surf:
+                        continue
+                    if surf in exclude or surf in seen:
+                        continue
+                    pos1 = getattr(m.feature, 'pos1', '')
+                    if pos1 in {'名詞','動詞','形容詞'}:
+                        vocab.append(surf); seen.add(surf)
+                        continue
+                    if _KANJI.search(surf):
+                        kanji.append(surf); seen.add(surf)
+                        continue
+                    if _KATA.search(surf):
+                        kata.append(surf); seen.add(surf)
+            else:
+                # Regex fallback when tagger is unavailable
+                try:
+                    for w in re.findall(r"[一-龯々〆ヵヶ]+", line):
+                        w = w.strip()
+                        if w and (w not in seen) and (w not in exclude):
+                            kanji.append(w); seen.add(w)
+                    for w in re.findall(r"[ァ-ヴー]+", line):
+                        w = w.strip()
+                        if w and (w not in seen) and (w not in exclude):
+                            kata.append(w); seen.add(w)
+                except Exception:
+                    pass
+        ordered = vocab + kanji + kata
+        out: List[Dict[str,str]] = []
+        uniq: set = set()
+        for w in ordered:
+            if w in uniq:
+                continue
+            uniq.add(w)
+            # reading via fugashi first token, fallback to hira
+            rd = ''
+            try:
+                toks = list(_tagger(w)) if _tagger else []
+                if toks:
+                    k = getattr(toks[0].feature, 'pron', None) or getattr(toks[0].feature, 'kana', None)
+                    rd = _to_hira(k if k else w)
+                else:
+                    rd = _to_hira(w)
+            except Exception:
+                rd = _to_hira(w)
+            en = best_gloss(w) or ''
+            out.append({'ja': w, 'read': rd, 'en': en})
+            if len(out) >= max_items:
+                break
+        # If still empty, try one more pass with regex-only from all lines
+        if not out:
+            try:
+                words = []
+                for ln in lines:
+                    words += re.findall(r"[一-龯々〆ヵヶ]+", ln)
+                    words += re.findall(r"[ァ-ヴー]+", ln)
+                for w in words:
+                    w = w.strip()
+                    if not w or w in uniq or w in exclude:
+                        continue
+                    rd = _to_hira(w)
+                    en = best_gloss(w) or ''
+                    out.append({'ja': w, 'read': rd, 'en': en})
+                    uniq.add(w)
+                    if len(out) >= max_items:
+                        break
+            except Exception:
+                pass
+        return out
+    except Exception:
+        return []
+
 @app.get("/api/overlay/suggestions")
 def get_suggestions():
     try:
@@ -320,7 +422,11 @@ def get_suggestions():
                     if '(' in p:
                         surf = p.split('(', 1)[0].strip()
                         if surf: exclude.add(surf)
-        items = _extract_suggestions(text, exclude)
+        # First preference: build suggestions from raw transcript directly
+        items = _extract_from_raw(text, exclude)
+        if not items:
+            # Fallback to similarity-based suggestions
+            items = _extract_suggestions(text, exclude)
         return JSONResponse({"items": items})
     except Exception:
         return JSONResponse({"items": []})
