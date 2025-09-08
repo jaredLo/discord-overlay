@@ -41,7 +41,6 @@
   let hoverTop = 0
   let hoverLeft = 0
   let highlightedEl: HTMLElement | null = null
-  let highlightedHtml: string | null = null
   import { appWindow } from '@tauri-apps/api/window'
   import { invoke } from '@tauri-apps/api/tauri'
   import SidebarPanel from './lib/components/SidebarPanel.svelte'
@@ -438,35 +437,27 @@
 
   // Hover handlers for vocabulary items
   function highlightContext(v?: Vocab) {
-    if (!v || !v.ctx) return
+    if (!v) return
     const container = transcriptEl?.querySelector('.content')
     if (!container) return
     if (highlightedEl) {
       highlightedEl.classList.remove('vocab-highlight')
-      if (highlightedHtml !== null) highlightedEl.innerHTML = highlightedHtml
     }
     highlightedEl = null
-    highlightedHtml = null
-    const nodes = Array.from(container.querySelectorAll('p, li')) as HTMLElement[]
-    for (const n of nodes) {
-      if (n.textContent && n.textContent.includes(v.ctx)) {
-        highlightedEl = n
-        highlightedHtml = n.innerHTML
-        n.classList.add('vocab-highlight')
-        const re = new RegExp(escapeRegExp(v.ja), 'g')
-        const attrs = `data-ja="${escapeAttr(v.ja)}"${v.read ? ` data-read="${escapeAttr(v.read)}"` : ''}${v.en ? ` data-en="${escapeAttr(v.en)}"` : ''}`
-        n.innerHTML = n.innerHTML.replace(re, `<span class="vocab-inline" ${attrs}>${v.ja}</span>`)
-        break
+    try {
+      const span = container.querySelector(`.vocab-inline[data-ja="${CSS.escape(v.ja)}"]`) as HTMLElement | null
+      const parent = span?.closest('p, li') as HTMLElement | null
+      if (parent) {
+        highlightedEl = parent
+        parent.classList.add('vocab-highlight')
       }
-    }
+    } catch {}
   }
   function clearHighlight() {
     if (highlightedEl) {
       highlightedEl.classList.remove('vocab-highlight')
-      if (highlightedHtml !== null) highlightedEl.innerHTML = highlightedHtml
     }
     highlightedEl = null
-    highlightedHtml = null
   }
   function onVocabEnter(e: MouseEvent, v: Vocab) {
     const el = e.currentTarget as HTMLElement

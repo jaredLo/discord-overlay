@@ -49,8 +49,8 @@ input, button, textarea { font-size: 14px; }
 /* Vocab list */
 .vocabs-header { display: flex; align-items: center; justify-content: space-between; }
 .vocabs-list { display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
-.vocab-item { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px; border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; background: rgba(255,255,255,0.02); }
-.vocab-item { position: relative; }
+.vocab-item { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px; border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; background: rgba(255,255,255,0.02); cursor: pointer; position: relative; }
+.vocab-item:hover { background: rgba(255,255,255,0.05); }
 .vocab-ja { background: #ef4444; color: #ffffff; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
 .vocab-read { background: #064e3b; color: #ffffff; padding: 2px 6px; border-radius: 4px; font-weight: 500; }
 .vocab-en { background: #93c5fd; color: #111827; padding: 2px 6px; border-radius: 4px; }
