@@ -49,7 +49,7 @@ export class ApiClient {
     const r = await httpFetch(url, { method: 'GET' }).catch(async (e) => { await logClient(`Api.suggestions error ${e?.message||e}`); throw e })
     await logClient(`Api.suggestions status=${r.status} dur=${(nowMs()-t0).toFixed(0)}ms`)
     if (r.status >= 400) throw new Error(`Suggestions failed ${r.status}`)
-    return r.data as { items: Array<{ ja: string, read?: string, en?: string }> }
+    return r.data as { items: Array<{ ja: string, read?: string, en?: string, hint?: string }> }
   }
 
   async asrDebugLog() {

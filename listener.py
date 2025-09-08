@@ -803,6 +803,7 @@ def update_suggestions(items):
             jp = (it.get("jp") or it.get("ja") or "").strip()
             rd = (it.get("reading_kana") or it.get("reading") or "").strip()
             en = (it.get("en") or it.get("meaning_en") or "").strip()
+            hint = (it.get("hint") or it.get("grammar") or "").strip()
             if not jp:
                 continue
             # avoid duplicates within the same batch only
@@ -810,7 +811,7 @@ def update_suggestions(items):
                 continue
             batch_seen.add(jp)
             rd2, en2 = _enrich_suggestion_fields(jp, rd, en)
-            new_items.append({"jp": jp, "reading_kana": rd2 or "", "en": en2 or "", "ts": now_ts})
+            new_items.append({"jp": jp, "reading_kana": rd2 or "", "en": en2 or "", "hint": hint, "ts": now_ts})
         if not new_items:
             return
         out = (existing + new_items)[-800:]
@@ -865,7 +866,7 @@ def _gpt_request(jp_text: str) -> Optional[Dict]:
         "Given ONE Japanese utterance, respond with STRICT JSON only: { jp_html, en_html, suggestions }. "
         "jp_html: EXACT verbatim of the input (no paraphrase/normalization). Preserve all characters and whitespace. No added readings, no extra symbols. "
         "en_html: Faithful, natural English translation of the entire utterance. "
-        "suggestions: 3–8 short, on-topic words or brief replies in Japanese (single terms/very short phrases), each as { jp, reading_kana, en }. Keep concise; avoid duplicates. "
+        "suggestions: 3–8 short, on-topic words or brief replies in Japanese (single terms/very short phrases), each as { jp, reading_kana, en, hint }. 'hint' gives a brief note on how to build or use the word or phrase (particles, conjugation, etc.). Keep concise; avoid duplicates. "
         "Constraints: VALID JSON only (no markdown). If no Japanese present, suggestions may be empty."
     )
     user = {

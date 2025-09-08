@@ -54,6 +54,7 @@ input, button, textarea { font-size: 14px; }
 .vocab-read { background: #064e3b; color: #ffffff; padding: 2px 6px; border-radius: 4px; font-weight: 500; }
 .vocab-en { background: #93c5fd; color: #111827; padding: 2px 6px; border-radius: 4px; }
 .vocab-count { background: #374151; color: #e5e7eb; padding: 1px 6px; border-radius: 999px; font-size: 11px; }
+.vocab-hint { background: #fcd34d; color: #111827; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
 
 /* Highlight corresponding transcript line when hovering vocab */
 .vocab-highlight {

@@ -38,6 +38,7 @@ def _load_env_file(path: Path):
 _load_env_file(ROOT / ".env")
 TRANSCRIPT_FILE = ROOT / "transcript.txt"
 WAVEFORM_FILE = ROOT / "waveform.json"
+SUGGESTIONS_FILE = ROOT / "suggestions.json"
 import re
 from typing import List, Dict, Optional
 import json as _json
@@ -219,6 +220,30 @@ def best_gloss(word: str) -> str:
     """Get the best English gloss for a Japanese word"""
     return _jisho_best_gloss(word)
 
+def _read_suggestions_file(max_items=30) -> List[Dict[str,str]]:
+    """Read persisted suggestions from suggestions.json if available."""
+    try:
+        if SUGGESTIONS_FILE.exists():
+            arr = _json.loads(SUGGESTIONS_FILE.read_text(encoding="utf-8")) or []
+            out: List[Dict[str,str]] = []
+            seen: set = set()
+            for it in reversed(arr):  # newest first
+                jp = (it.get('jp') or it.get('ja') or '').strip()
+                if not jp or jp in seen:
+                    continue
+                seen.add(jp)
+                rd = (it.get('reading_kana') or it.get('read') or '').strip()
+                en = (it.get('en') or '').strip()
+                hint = (it.get('hint') or '').strip()
+                out.append({'ja': jp, 'read': rd, 'en': en, 'hint': hint})
+                if len(out) >= max_items:
+                    break
+            out.reverse()
+            return out
+    except Exception:
+        pass
+    return []
+
 def _internal_suggestions(bases: List[str], max_items=30) -> List[Dict[str,str]]:
     """Optional hook to an internal JP library/service.
     If env SIM_API_URL is set, POST { bases: [...], top_k } and expect
@@ -240,7 +265,8 @@ def _internal_suggestions(bases: List[str], max_items=30) -> List[Dict[str,str]]
                 if not ja: continue
                 rd = (it.get('read') or it.get('reading') or it.get('reading_kana') or '').strip()
                 en = (it.get('en') or it.get('gloss') or '').strip()
-                out.append({ 'ja': ja, 'read': rd, 'en': en })
+                hint = (it.get('hint') or it.get('grammar') or '').strip()
+                out.append({ 'ja': ja, 'read': rd, 'en': en, 'hint': hint })
             if out:
                 return out[:max_items]
     except Exception:
@@ -257,7 +283,8 @@ def _internal_suggestions(bases: List[str], max_items=30) -> List[Dict[str,str]]
             if not ja: continue
             rd = (it.get('read') or it.get('reading') or it.get('reading_kana') or '').strip()
             en = (it.get('en') or it.get('gloss') or '').strip()
-            out.append({ 'ja': ja, 'read': rd, 'en': en })
+            hint = (it.get('hint') or it.get('grammar') or '').strip()
+            out.append({ 'ja': ja, 'read': rd, 'en': en, 'hint': hint })
         return out[:max_items]
     except Exception:
         return []
@@ -303,8 +330,9 @@ def _extract_suggestions(text: str, exclude: set, max_items=30) -> List[Dict[str
             en = (it.get('en') or '').strip()
             if not en: continue
             rd = (it.get('read') or '').strip() or _reading_for(ja)
+            hint = (it.get('hint') or '').strip()
             seen.add(ja)
-            filtered.append({ 'ja': ja, 'read': rd, 'en': en })
+            filtered.append({ 'ja': ja, 'read': rd, 'en': en, 'hint': hint })
             if len(filtered) >= max_items: break
         return filtered
 
@@ -318,7 +346,7 @@ def _extract_suggestions(text: str, exclude: set, max_items=30) -> List[Dict[str
             en = _jisho_best_gloss(w)
             # Require a real English gloss; skip if none
             if not en: continue
-            out.append({ 'ja': w, 'read': rd, 'en': en })
+            out.append({ 'ja': w, 'read': rd, 'en': en, 'hint': '' })
     return out
 
 def _extract_from_raw(text: str, exclude: set, max_items=30) -> List[Dict[str,str]]:
@@ -392,7 +420,7 @@ def _extract_from_raw(text: str, exclude: set, max_items=30) -> List[Dict[str,st
             except Exception:
                 rd = _to_hira(w)
             en = best_gloss(w) or ''
-            out.append({'ja': w, 'read': rd, 'en': en})
+            out.append({'ja': w, 'read': rd, 'en': en, 'hint': ''})
             if len(out) >= max_items:
                 break
         # If still empty, try one more pass with regex-only from all lines
@@ -408,7 +436,7 @@ def _extract_from_raw(text: str, exclude: set, max_items=30) -> List[Dict[str,st
                         continue
                     rd = _to_hira(w)
                     en = best_gloss(w) or ''
-                    out.append({'ja': w, 'read': rd, 'en': en})
+                    out.append({'ja': w, 'read': rd, 'en': en, 'hint': ''})
                     uniq.add(w)
                     if len(out) >= max_items:
                         break
@@ -435,11 +463,14 @@ def get_suggestions():
                     if '(' in p:
                         surf = p.split('(', 1)[0].strip()
                         if surf: exclude.add(surf)
-        # First preference: build suggestions from raw transcript directly
-        items = _extract_from_raw(text, exclude)
+        # Prefer persisted GPT suggestions if available
+        items = [it for it in _read_suggestions_file() if it['ja'] not in exclude]
         if not items:
-            # Fallback to similarity-based suggestions
-            items = _extract_suggestions(text, exclude)
+            # Build from raw transcript directly
+            items = _extract_from_raw(text, exclude)
+            if not items:
+                # Fallback to similarity-based suggestions
+                items = _extract_suggestions(text, exclude)
         return JSONResponse({"items": items})
     except Exception:
         return JSONResponse({"items": []})

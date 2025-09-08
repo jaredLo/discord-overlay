@@ -53,7 +53,7 @@
   let rightOpen = true
   const RIGHT_W_OPEN = 260
   const RIGHT_W_CLOSED = 26
-  type Suggest = { ja: string, read?: string, en?: string, ctx?: string }
+  type Suggest = { ja: string, read?: string, en?: string, ctx?: string, hint?: string }
   let suggTimeline: Array<Suggest & { count: number }> = []
   const suggCounts: Record<string, number> = {}
   // Far right: Raw transcription (append-only chat-style)
@@ -528,6 +528,7 @@
             <span class="vocab-ja">{s.ja}</span>
             {#if s.read}<span class="vocab-read">{s.read}</span>{/if}
             {#if s.en}<span class="vocab-en">{s.en}</span>{/if}
+            {#if s.hint}<span class="vocab-hint">{s.hint}</span>{/if}
             {#if s.count>1}<span class="vocab-count">×{s.count}</span>{/if}
           </div>
         {/each}
