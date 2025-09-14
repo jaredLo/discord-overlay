@@ -866,7 +866,7 @@ def _gpt_request(jp_text: str) -> Optional[Dict]:
         "Given ONE Japanese utterance, respond with STRICT JSON only: { jp_html, en_html, suggestions }. "
         "jp_html: EXACT verbatim of the input (no paraphrase/normalization). Preserve all characters and whitespace. No added readings, no extra symbols. "
         "en_html: Faithful, natural English translation of the entire utterance. "
-        "suggestions: 3–8 short, on-topic words or brief replies in Japanese (single terms/very short phrases), each as { jp, reading_kana, en, hint }. 'hint' gives a brief note on how to build or use the word or phrase (particles, conjugation, etc.). Keep concise; avoid duplicates. "
+        "suggestions: 3-8 short, on-topic words or brief replies in Japanese (single terms/very short phrases), each as { jp, reading_kana, en, hint }. 'hint' gives a brief note on how to build or use the word or phrase (particles, conjugation, etc.). Keep concise; avoid duplicates. "
         "Constraints: VALID JSON only (no markdown). If no Japanese present, suggestions may be empty."
     )
     user = {
