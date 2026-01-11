@@ -1,4 +1,5 @@
-# Discord Overlay – Tauri Client + FastAPI
+# Discord Overlay – Tauri Client + FastAPI (KotoFloat - 言葉 (kotoba/words) + float)
+
 
 ## Prereqs
 - Python (Conda env): `conda activate discord-overlay`
