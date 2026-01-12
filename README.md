@@ -1,6 +1,6 @@
 # Discord Overlay – Tauri Client + FastAPI (KotoFloat - 言葉 (kotoba/words) + float)
 
-## I am passionate on learning Japanese, so I made this tool, a desktop overlay that listens to Japanese conversation and extracts keywords in real-time, helping learners follow along during voice calls(mainly on Japanese-English language exchange servers on Discord) without pausing to look things up.
+I am passionate on learning Japanese, so I made this tool, a desktop overlay that listens to Japanese conversation and extracts keywords in real-time, helping learners follow along during voice calls(mainly on Japanese-English language exchange servers on Discord) without pausing to look things up.
 
 ## Prereqs
 - Python (Conda env): `conda activate discord-overlay`
