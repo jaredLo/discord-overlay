@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">KotoFloat</string>
+    <string name="notification_channel_name">Audio Capture</string>
+    <string name="notification_title">KotoFloat listening…</string>
+    <string name="notification_recording">Listening for speech…</string>
+</resources>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Allow cleartext HTTP on private networks (local dev).
+     Non-private IPs require HTTPS. Acceptable for personal sideloaded app. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

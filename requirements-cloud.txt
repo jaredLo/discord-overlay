@@ -1,0 +1,9 @@
+# Cloud backend dependencies (no sounddevice/PySide6/webrtcvad)
+fastapi
+uvicorn[standard]
+websockets
+requests
+numpy
+fugashi
+unidic-lite
+pykakasi

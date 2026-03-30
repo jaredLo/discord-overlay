@@ -29,3 +29,17 @@ desktop/src-tauri/target/
 logs/
 tmp/
 uploads/
+
+# Runtime data
+data/
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/app/src/main/assets/*.onnx
+android/local.properties
+
+# Server runtime
+server/*.sqlite
+server/vocab_cache.sqlite

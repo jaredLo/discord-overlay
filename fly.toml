@@ -1,0 +1,58 @@
+# KotoFloat Cloud Backend — Fly.io config
+# Paid plan required: 512MB-1GB RAM + persistent volume
+
+app = "kotofloat"
+primary_region = "nrt"  # Tokyo (closest to Malaysia/Japan)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[deploy]
+  strategy = "immediate"  # Stop old before starting new (single persistent volume)
+
+[env]
+  PORT = "8201"
+  DATA_DIR = "/data"
+  JMDICT_PATH = "/app/static/jmdict.db"
+
+[http_service]
+  internal_port = 8201
+  force_https = true
+  auto_stop_machines = "off"    # Keep warm — no scale-to-zero
+  auto_start_machines = true
+  min_machines_running = 1
+  max_machines_running = 1       # Single machine (persistent volume constraint)
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 25
+    soft_limit = 20
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[mounts]
+  source = "kotofloat_data"
+  destination = "/data"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8201
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+
+  [[services.http_checks]]
+    interval = 15000
+    grace_period = "10s"
+    method = "GET"
+    path = "/api/health"
+    protocol = "http"
+    timeout = 5000
